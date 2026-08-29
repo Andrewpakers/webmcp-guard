@@ -1,7 +1,7 @@
 import type { PostureSnapshot } from "@webmcp-guard/shared";
 import { describe, expect, it } from "vitest";
 
-import { agentInfoFromPosture, pickBrand } from "./posture";
+import { agentInfoFromPosture, pickBrand, postureBrands } from "./posture";
 
 const posture: PostureSnapshot = {
   brands: [
@@ -36,6 +36,56 @@ describe("pickBrand", () => {
     expect(pickBrand(undefined)).toBeUndefined();
     expect(pickBrand([])).toBeUndefined();
     expect(pickBrand([{ brand: ";Not A Brand", version: "99" }])).toBeUndefined();
+  });
+});
+
+describe("postureBrands", () => {
+  it("reports every real Client-Hints brand, GREASE excluded", () => {
+    expect(postureBrands(posture)).toEqual([
+      { brand: "Chromium", version: "149" },
+      { brand: "Google Chrome", version: "149" },
+    ]);
+  });
+
+  it("derives brands from the UA string when Client Hints are absent", () => {
+    expect(
+      postureBrands({
+        isSecureContext: true,
+        timestamp: posture.timestamp,
+        userAgent:
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+          "HeadlessChrome/151.0.0.0 Safari/537.36",
+      }),
+    ).toEqual([
+      { brand: "HeadlessChrome", version: "151" },
+      { brand: "Chromium", version: "151" },
+    ]);
+  });
+
+  it("does not second-guess Client Hints with the UA string", () => {
+    expect(
+      postureBrands({
+        ...posture,
+        userAgent:
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+          "Chrome/120.0.0.0 Safari/537.36",
+      }).map((entry) => entry.version),
+    ).toEqual(["149", "149"]);
+  });
+
+  it("falls back to the UA when every reported brand was GREASE", () => {
+    expect(
+      postureBrands({
+        isSecureContext: true,
+        timestamp: posture.timestamp,
+        brands: [{ brand: "Not.A/Brand", version: "24" }],
+        userAgent: "Mozilla/5.0 (X11; Linux) Firefox/142.0",
+      }),
+    ).toEqual([{ brand: "Firefox", version: "142" }]);
+  });
+
+  it("reports nothing when there is nothing to report", () => {
+    expect(postureBrands({ isSecureContext: false, timestamp: posture.timestamp })).toEqual([]);
   });
 });
 

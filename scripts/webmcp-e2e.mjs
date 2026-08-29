@@ -12,6 +12,12 @@
  *   node scripts/webmcp-e2e.mjs --url http://localhost:3000 call search_patients '{"query":"hypertension"}'
  *   node scripts/webmcp-e2e.mjs --url http://localhost:3000/patients shot out.png
  *   node scripts/webmcp-e2e.mjs --url http://localhost:3000 eval 'document.title'
+ *   node scripts/webmcp-e2e.mjs --url http://localhost:3000 confirm delete_patient '{"patient":"LM-100060"}' decline
+ *
+ * `confirm` is `call` plus a human: it starts the tool call, waits for WebMCP
+ * Guard's approval modal to appear in the page, clicks Approve or Decline
+ * through its data-testid, and then prints whatever the agent got back. That is
+ * the Phase 5 confirmation flow driven end to end, with the real modal.
  *
  * Requires: snap chromium >= 149 (this machine: 151). Note snap confinement —
  * chromium cannot read /tmp, so screenshots are written by this script, not
@@ -31,7 +37,7 @@ function flag(name, fallback) {
 const url = flag("--url", "http://localhost:3000");
 const timeoutMs = Number(flag("--timeout", "30000"));
 const minTools = Number(flag("--min-tools", "1"));
-const cmdIdx = args.findIndex((a) => ["list", "call", "shot", "eval"].includes(a));
+const cmdIdx = args.findIndex((a) => ["list", "call", "shot", "eval", "confirm"].includes(a));
 const command = cmdIdx >= 0 ? args[cmdIdx] : "list";
 const cmdArgs = cmdIdx >= 0 ? args.slice(cmdIdx + 1) : [];
 
@@ -184,6 +190,72 @@ try {
          return r;
        })()`,
     );
+    console.log(typeof result === "string" ? result : JSON.stringify(result, null, 2));
+  } else if (command === "confirm") {
+    const [toolName, jsonInput = "{}", choice = "decline"] = cmdArgs;
+    const testId =
+      choice === "approve"
+        ? "webmcp-guard-confirmation-approve"
+        : "webmcp-guard-confirmation-decline";
+
+    // Start the call without awaiting it: the guarded execute is blocked on the
+    // modal, which does not exist yet.
+    await evalInPage(
+      cdp,
+      `(async () => {
+         const mc = document.modelContext ?? navigator.modelContext;
+         const ts = await mc.getTools();
+         const tool = ts.find(t => t.name === ${JSON.stringify(toolName)});
+         if (!tool) throw new Error("tool not registered: " + ${JSON.stringify(toolName)});
+         window.__webmcpGuardCall = mc.executeTool(tool, ${JSON.stringify(jsonInput)});
+         return "started";
+       })()`,
+    );
+
+    // Wait for the real modal to be in the page…
+    const shown = await evalInPage(
+      cdp,
+      `(async () => {
+         for (let i = 0; i < 60; i++) {
+           const dialog = document.querySelector('[data-testid="webmcp-guard-confirmation"]');
+           if (dialog) {
+             return {
+               tool: document.querySelector('[data-testid="webmcp-guard-confirmation-tool"]')?.textContent,
+               message: document.querySelector('[data-testid="webmcp-guard-confirmation-message"]')?.textContent,
+               args: document.querySelector('[data-testid="webmcp-guard-confirmation-args"]')?.textContent,
+               visible: true,
+             };
+           }
+           await new Promise(r => setTimeout(r, 250));
+         }
+         return null;
+       })()`,
+    );
+
+    // …optionally photograph it, then click the way a person would.
+    const clicked = shown;
+    if (clicked && args.includes("--shot")) {
+      await sleep(400);
+      const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
+      clicked.screenshot = shot.data;
+    }
+    if (clicked) {
+      await evalInPage(
+        cdp,
+        `document.querySelector('[data-testid="${testId}"]').click(), "clicked"`,
+      );
+    }
+
+    if (!clicked) {
+      console.error("FAIL: the confirmation modal never appeared");
+      cleanup(1);
+    }
+    console.error(`[modal] ${JSON.stringify(clicked)}`);
+    if (clicked.screenshot) {
+      writeFileSync(flag("--shot", "modal.png"), Buffer.from(clicked.screenshot, "base64"));
+    }
+
+    const result = await evalInPage(cdp, "window.__webmcpGuardCall");
     console.log(typeof result === "string" ? result : JSON.stringify(result, null, 2));
   } else if (command === "shot") {
     const [outfile = "screenshot.png"] = cmdArgs;

@@ -157,21 +157,33 @@ suite green).
 
 ## Phase 5 — Posture, confirmation, justification
 
-- [ ] Posture snapshot in SDK (UA Client Hints + fallback, secure context,
+- [x] Posture snapshot in SDK (UA Client Hints + fallback, secure context,
       best-effort agent id) and posture matchers in the policy engine
-- [ ] Posture rule pack seeded but **disabled by default** (judge-safety);
-      console toggle
-- [ ] `require-confirmation` flow: in-page modal, one-time confirmation id,
-      decline returns policy explanation to agent
-- [ ] `require-justification`: schema injection of required `justification`
+      _(UA parsing lives in `@webmcp-guard/shared/user-agent` so the SDK and the
+      server derive identical brands; `agents` removed from
+      `UNEVALUATABLE_MATCHERS`; a rule with an `agents` matcher does **not**
+      fire when a call carried no posture — permissive on purpose, documented
+      in `agentMatches`)_
+- [x] Posture rule pack seeded but **disabled by default** (judge-safety);
+      console toggle _(`posture-deny-unknown-agent`, `posture-deny-old-browser`
+      at priorities 5/6 — posture decides before anything else)_
+- [x] `require-confirmation` flow: in-page modal, one-time confirmation id,
+      decline returns policy explanation to agent _(id is consumed **before**
+      it is validated, so a replayed or tampered attempt burns it; the modal is
+      vanilla DOM with `data-testid` hooks and a replaceable
+      `confirmationHandler`)_
+- [x] `require-justification`: schema injection of required `justification`
       field on gated tools; heuristic evaluator; justification + verdict in
-      logs/console
+      logs/console _(new non-admin `GET /policies/effective`; the gate strips
+      the field before the tool runs and keeps it in the audit entry)_
 - [ ] Stretch (skip if behind): pluggable LLM evaluator behind `LLM_API_KEY`,
-      heuristic fallback on error
+      heuristic fallback on error _(**interface + config plumbing shipped**
+      (`GuardServerConfig.evaluator`, `JustificationEvaluator`), LLM
+      implementation deliberately skipped)_
 - [ ] Stretch (skip if behind): masked-at-rest UI fields with logged
       click-to-reveal (anti-circumvention demo, see docs/05 + threat model)
-- [ ] Review gate (**Fable** — critical phase, suite green)
-- [ ] **Commit: `feat: posture checks, confirmation, justification`**
+- [x] Review gate (**Fable** — critical phase, suite green) — APPROVED
+- [x] **Commit: `feat: posture checks, confirmation, justification`**
 
 ## Phase 6 — Roles (optional; cut first if behind)
 
@@ -294,3 +306,53 @@ what's next, deviations/decisions._
   exact-origin, 401 handling, masked-then-audited reveal, byte-identical
   policy round-trip, live-edit with no redeploy. 880 tests green.
   SUBMITTABLE CHECKPOINT reached. Next: Phase 5.
+- 2026-08-29 — Phase 5 built (posture, confirmation, justification). 50 files
+  / 1068 tests green; typecheck + lint clean. Awaiting the Fable review gate.
+  **Seed change of record:** `delete-patient-deny-temp` is **deleted** from
+  `DEFAULT_POLICY_RULES`; `export-requires-justification` (40 chars) and
+  `destructive-requires-confirmation` are now enabled; the `posture-*` pack is
+  seeded disabled. Seeding only runs on an empty store, so an existing
+  `apps/portal/data` keeps the old policy — wipe it (or edit in the console) to
+  pick the new pack up. Decisions/deviations: (1) the audit record stores
+  `justification` (text, existing column) plus a new
+  `justificationVerdict: {verdict, reason}` rather than one nested object —
+  that is exactly the shape the console's `readJustification` already reads
+  defensively, and it keeps pre-Phase-5 rows meaningful; the SQLite adapter
+  gained a guarded `ALTER TABLE` migration because `CREATE TABLE IF NOT EXISTS`
+  cannot widen an existing table. (2) `GET /policies/effective` is
+  **unauthenticated**, like `/gate` — the SDK needs it from the page before
+  registration; it answers with two booleans and a number, leaks no rule
+  internals, and `effective` joined `reorder` in `RESERVED_RULE_IDS` so no rule
+  can shadow the route. (3) A confirmation id is consumed **before** it is
+  validated, so a replay, an expired replay and a tampered replay all destroy
+  it. (4) A registration-time policy-read failure registers the tool
+  **without** injection (availability over enforcement at the schema layer; the
+  gate still enforces). (5) The SDK now owns an `AbortController` per
+  registration, chained to the host's signal, because re-registration is
+  abort-then-register. (6) UA parsing lives in
+  `@webmcp-guard/shared/user-agent` so SDK and server derive identical brands.
+  **WebMCP discrepancy #2 (trust the browser):** Chromium 151 *keeps the
+  existing tool* when a live tool name is registered again, so the replacement
+  must be built only after the old registration is aborted — registering first
+  left the page on the stale schema forever. Caught by the headless e2e run,
+  fixed, and now covered by regression tests. E2E on a fresh data dir: export
+  blocked → instructive message → justified export returns CSV with the
+  justification + pass verdict in the log; the `delete_patient` modal driven
+  both ways over CDP (decline → patient intact, approve → deleted, log shows
+  the human-confirmed allow); the same confirmation id replayed with curl →
+  deny; `posture-deny-unknown-agent` toggled on → headless Chromium denied →
+  toggled back off; policy flip re-registered `export_patients` in the live
+  page within ~30 s. Modal capture in `docs/captures/phase5/`. Stretch items
+  (LLM evaluator implementation, masked-at-rest UI) not built — the evaluator
+  *interface* and config plumbing are. Next: Fable review gate, then Phase 6/7.
+- 2026-08-29 — Phase 5 Fable review APPROVED (confirmation module + gate
+  wiring read line-by-line: burn-before-validate, args-hash binding,
+  consume-even-when-stale, justification stripped before detokenization,
+  vault unreachable pre-allow). 1068 tests green; committed. Accepted
+  deviations: flat `justification` + `justificationVerdict` log fields;
+  non-admin `/policies/effective` (4 primitives, /gate trust position);
+  confirmation ids not session-bound; confirmation+justification combo on
+  one rule inexpressible (action union — future work). Ops note: GitHub
+  repo creation and Render/Vercel deploys are blocked on user
+  credentials — consolidated ask planned after Phase 6. Next: Phase 6
+  (roles — small; engine `roles` matcher exists since Phase 2).

@@ -1,5 +1,6 @@
 import type { GateVerdict, JsonObject, SessionContext } from "@webmcp-guard/shared";
 
+import type { ConfirmationDecision, ConfirmationHandler } from "./confirmation";
 import type { WebMcpExecuteContext, WebMcpSurface, WebMcpToolAnnotations } from "./webmcp";
 
 /**
@@ -71,7 +72,8 @@ export interface BlockedInfo {
 }
 
 /** Pipeline stages the Agent Activity drawer renders. */
-export type GuardEventType = "gate" | "blocked" | "executed" | "transformed" | "error";
+export type GuardEventType =
+  "gate" | "confirmation" | "blocked" | "executed" | "transformed" | "error";
 
 /**
  * One pipeline event. Page-local and human-facing: unlike the strings returned
@@ -85,6 +87,8 @@ export interface GuardEvent {
   /** Server-issued call id, once the gate has answered. */
   callId?: string;
   verdict?: GateVerdict;
+  /** What the person chose. Only on `type: "confirmation"`. */
+  decision?: ConfirmationDecision;
   /** ISO-8601 timestamp, client clock. */
   at: string;
   detail?: string;
@@ -107,6 +111,19 @@ export interface CreateGuardOptions {
   onBlocked?: (info: BlockedInfo) => void;
   /** Injectable `fetch`, for tests and for hosts with a wrapped transport. */
   fetchImpl?: typeof fetch;
+  /**
+   * Replaces the built-in approval modal for `require-confirmation` verdicts.
+   * Defaults to `defaultConfirmationHandler`, which renders one in the page.
+   */
+  confirmationHandler?: ConfirmationHandler;
+  /**
+   * How often registered tools re-check effective policy, in milliseconds
+   * (`docs/04` behavior 3: "listen for policy updates via periodic refetch").
+   * `0` disables the timer; `guard.refreshPolicies()` still works.
+   *
+   * Defaults to {@link POLICY_REFRESH_INTERVAL_MS}.
+   */
+  policyRefreshMs?: number;
 }
 
 /** The object `createGuard` returns. */
@@ -124,7 +141,19 @@ export interface Guard {
   subscribe(listener: GuardEventListener): () => void;
   /** The last {@link GUARD_EVENT_BUFFER_SIZE} events, oldest first. */
   recentEvents(): GuardEvent[];
+  /**
+   * Re-reads effective policy for every registered tool and re-registers the
+   * ones whose input schema changed (`docs/08`: re-registration is abort +
+   * register). Runs on a timer as well; exposed so a host can wire it to a
+   * "refresh policy" button, and so tests do not have to wait 30 seconds.
+   *
+   * Resolves with the number of tools that were re-registered. Never throws.
+   */
+  refreshPolicies(): Promise<number>;
 }
 
 /** How many events `recentEvents()` keeps, so a late-mounted drawer has history. */
 export const GUARD_EVENT_BUFFER_SIZE = 50;
+
+/** Default period for the effective-policy refresh (`docs/04` behavior 3). */
+export const POLICY_REFRESH_INTERVAL_MS = 30_000;

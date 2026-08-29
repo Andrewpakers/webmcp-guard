@@ -7,11 +7,15 @@ import type {
 } from "@webmcp-guard/shared";
 
 import { isAbortError } from "./abort";
+import type { ConfirmationDecision, ConfirmationHandler } from "./confirmation";
 import { type GuardEventHub, guardEvent } from "./events";
 import {
+  APPROVAL_NOT_ACCEPTED_MESSAGE,
   BLOCKED_FALLBACK_MESSAGE,
   CANCELLED_MESSAGE,
+  CONFIRMATION_UNAVAILABLE_MESSAGE,
   EMPTY_RESULT_MESSAGE,
+  declinedMessage,
   executeFailedMessage,
   invalidArgumentsMessage,
   verificationFailedMessage,
@@ -21,12 +25,16 @@ import { GuardStageError, type TransportConfig, postGate, postTransform } from "
 import type { BlockedInfo, GuardExecuteContext, GuardToolDefinition } from "./types";
 
 /**
- * The execute pipeline: **gate → execute → transform**, in that order, with
- * fail-closed semantics at every step (`docs/03` data flow, `docs/04`
- * behavior 4).
+ * The execute pipeline: **gate → (confirm) → execute → transform**, in that
+ * order, with fail-closed semantics at every step (`docs/03` data flow,
+ * `docs/04` behavior 4).
  *
  * The invariants a reviewer should hold this file to:
  *
+ *  0. A `require-confirmation` verdict is only ever turned into a call by a
+ *     *second* gate round trip carrying the one-time id the guard issued, and
+ *     only after a human decision. Declining, cancelling, a handler that
+ *     throws, and a missing id all stop the call.
  *  1. The site's `execute` runs **only** after a validated `allow` verdict.
  *  2. A raw, untransformed result never reaches the agent. If `/transform`
  *     cannot be reached or answers with something the SDK does not trust, the
@@ -44,6 +52,8 @@ export interface PipelineConfig extends TransportConfig {
   getSessionContext?: () => SessionContext | undefined;
   onBlocked?: (info: BlockedInfo) => void;
   events: GuardEventHub;
+  /** Asks the person at the keyboard to approve a `require-confirmation` call. */
+  confirmationHandler: ConfirmationHandler;
 }
 
 /** The shape the browser actually invokes: input only, context only sometimes. */
@@ -145,9 +155,22 @@ export function createGuardedExecute(
     const sessionContext = readSessionContext(config.getSessionContext);
     if (sessionContext) request.sessionContext = sessionContext;
 
+    /** One gate round trip, plus the event the drawer renders for it. */
+    async function callGate(payload: GateRequest): Promise<GateResponse> {
+      const response = await postGate(config, payload, signal);
+      emit(
+        guardEvent("gate", tool, {
+          callId: response.callId,
+          verdict: response.verdict,
+          ...(response.message ? { detail: response.message } : {}),
+        }),
+      );
+      return response;
+    }
+
     let gate: GateResponse;
     try {
-      gate = await postGate(config, request, signal);
+      gate = await callGate(request);
     } catch (error) {
       if (isAbortError(error, signal)) {
         emit(guardEvent("error", tool, { detail: "cancelled during the gate call" }));
@@ -157,19 +180,92 @@ export function createGuardedExecute(
       return verificationFailedMessage("gate");
     }
 
-    emit(
-      guardEvent("gate", tool, {
-        callId: gate.callId,
-        verdict: gate.verdict,
-        ...(gate.message ? { detail: gate.message } : {}),
-      }),
-    );
+    // ---- 2. Human confirmation --------------------------------------------
+    /**
+     * `require-confirmation` is the one verdict that is a *question*, not an
+     * answer: the guard hands back a one-time id, the SDK asks the person at
+     * the keyboard, and — only on approval — re-issues the identical gate call
+     * carrying that id. The second answer is the real verdict.
+     *
+     * Exactly one round of this happens. If the second gate call somehow asks
+     * for confirmation again, it falls through to the blocked path below rather
+     * than looping: an agent must never be able to drive a modal storm.
+     */
+    if (gate.verdict === "require-confirmation" && gate.confirmationId !== undefined) {
+      const confirmationId = gate.confirmationId;
+      let decision: ConfirmationDecision;
 
-    // ---- 2. Verdict --------------------------------------------------------
+      try {
+        decision = await config.confirmationHandler({
+          app: config.app,
+          tool,
+          message: gate.message ?? BLOCKED_FALLBACK_MESSAGE,
+          args,
+          callId: gate.callId,
+          confirmationId,
+          ...(signal ? { signal } : {}),
+        });
+      } catch (error) {
+        // A broken approval UI is not an approval.
+        emit(
+          guardEvent("error", tool, {
+            callId: gate.callId,
+            detail: `confirmation: ${describe(error)}`,
+          }),
+        );
+        decision = "declined";
+      }
+
+      emit(
+        guardEvent("confirmation", tool, {
+          callId: gate.callId,
+          verdict: gate.verdict,
+          decision,
+          detail:
+            decision === "approved"
+              ? "The person using this page approved the call."
+              : decision === "declined"
+                ? "The person using this page declined the call."
+                : "The call was cancelled before anyone could answer.",
+        }),
+      );
+
+      if (signal?.aborted || decision === "cancelled") return CANCELLED_MESSAGE;
+
+      if (decision === "approved") {
+        try {
+          gate = await callGate({ ...request, confirmationId });
+        } catch (error) {
+          if (isAbortError(error, signal)) {
+            emit(guardEvent("error", tool, { detail: "cancelled during the gate call" }));
+            return CANCELLED_MESSAGE;
+          }
+          emit(guardEvent("error", tool, { detail: `gate: ${describe(error)}` }));
+          return verificationFailedMessage("gate");
+        }
+
+        // The approval was spent but the guard still refused (expired while the
+        // modal was open, arguments changed, policy moved). Say so plainly.
+        if (gate.verdict !== "allow" && gate.message === undefined) {
+          gate = { ...gate, message: APPROVAL_NOT_ACCEPTED_MESSAGE };
+        }
+      } else {
+        // Declined. The agent gets the policy's own explanation plus the one
+        // fact it most needs: a person said no.
+        gate = { ...gate, message: declinedMessage(gate.message) };
+      }
+    }
+
+    // ---- 3. Verdict --------------------------------------------------------
     if (gate.verdict !== "allow") {
-      // Confirmation and justification flows land in Phase 5; until then any
-      // verdict that is not a plain `allow` stops the call. Fail closed.
-      const message = gate.message ?? BLOCKED_FALLBACK_MESSAGE;
+      // Everything that is not a plain `allow` stops the call. Fail closed.
+      // A `require-confirmation` that reaches here had no confirmation id to
+      // work with, so there was nothing for anyone to approve.
+      const message =
+        gate.message ??
+        (gate.verdict === "require-confirmation"
+          ? CONFIRMATION_UNAVAILABLE_MESSAGE
+          : BLOCKED_FALLBACK_MESSAGE);
       emit(
         guardEvent("blocked", tool, {
           callId: gate.callId,
@@ -192,7 +288,7 @@ export function createGuardedExecute(
       return message;
     }
 
-    // ---- 3. The site's own execute, in the page ----------------------------
+    // ---- 4. The site's own execute, in the page ----------------------------
     let result: unknown;
     try {
       // Detokenized args from the gate when it supplied them, the agent's own
@@ -215,7 +311,7 @@ export function createGuardedExecute(
     }
     emit(guardEvent("executed", tool, { callId: gate.callId, verdict: gate.verdict }));
 
-    // ---- 4. Transform ------------------------------------------------------
+    // ---- 5. Transform ------------------------------------------------------
     let transformed: TransformResponse;
     try {
       transformed = await postTransform(

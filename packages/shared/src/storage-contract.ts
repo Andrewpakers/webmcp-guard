@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { POLICY_VERSION, RuleSchema, type Rule } from "./policy";
 import {
+  ConfirmationEntrySchema,
   GuardStorageError,
   LOG_QUERY_MAX_LIMIT,
   LogRecordSchema,
+  type ConfirmationEntry,
   type GuardStorage,
   type LogRecord,
   type VaultEntry,
@@ -54,6 +56,21 @@ function logRecord(overrides: Partial<LogRecord> & { id: string }): LogRecord {
     durationMs: 0,
     payloads: { argsBefore: {}, argsAfter: {}, resultBefore: null, resultAfter: null },
     status: "complete",
+    ...overrides,
+  };
+}
+
+/** A confirmation that is valid for another hour unless overridden. */
+function confirmationEntry(overrides: Partial<ConfirmationEntry> = {}): ConfirmationEntry {
+  const issuedAt = new Date();
+  return {
+    id: "c8f6b7f4-6f0c-4a4b-9f9a-7e0f9e2b1c3d",
+    app: APP,
+    tool: "delete_patient",
+    argsHash: "9f2c0a4b5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708",
+    callId: "call-1",
+    issuedAt: issuedAt.toISOString(),
+    expiresAt: new Date(issuedAt.getTime() + 3_600_000).toISOString(),
     ...overrides,
   };
 }
@@ -319,6 +336,7 @@ export function runGuardStorageContract(name: string, createStorage: GuardStorag
             resultAfter: { ssn: "tok_ssn_8f3a2c19" },
           },
           justification: "Refill request from the patient",
+          justificationVerdict: { verdict: "pass", reason: "Specific and long enough." },
           message: "Blocked by policy",
         });
 
@@ -413,12 +431,14 @@ export function runGuardStorageContract(name: string, createStorage: GuardStorag
           verdict: "deny",
           message: "Blocked late",
           justification: "because",
+          justificationVerdict: { verdict: "fail", reason: "Too short to be a reason." },
         });
 
         expect(completed).toMatchObject({
           verdict: "deny",
           message: "Blocked late",
           justification: "because",
+          justificationVerdict: { verdict: "fail", reason: "Too short to be a reason." },
         });
       });
 
@@ -701,6 +721,96 @@ export function runGuardStorageContract(name: string, createStorage: GuardStorag
           ciphertext: "b3RoZXI=",
         });
         expect(await storage.getVaultEntry("tok_ssn_8f3a2c19")).toMatchObject({ dataClass: "ssn" });
+      });
+    });
+
+    /**
+     * One-time human approvals. These four behaviours are what stops an
+     * approved `delete_patient` from being replayed, so an adapter that gets
+     * any of them wrong is a security bug, not a compatibility quirk.
+     */
+    describe("confirmations", () => {
+      it("round-trips every field", async () => {
+        const entry = confirmationEntry();
+        expect(await storage.putConfirmation(entry)).toEqual(entry);
+
+        const consumed = await storage.consumeConfirmation(entry.id);
+        expect(consumed).toEqual(entry);
+        expect(ConfirmationEntrySchema.parse(consumed)).toEqual(entry);
+      });
+
+      it("is single use: the second consume returns null", async () => {
+        const entry = confirmationEntry();
+        await storage.putConfirmation(entry);
+
+        expect(await storage.consumeConfirmation(entry.id)).not.toBeNull();
+        expect(await storage.consumeConfirmation(entry.id)).toBeNull();
+        expect(await storage.consumeConfirmation(entry.id)).toBeNull();
+      });
+
+      it("survives two consumers racing for the same id", async () => {
+        const entry = confirmationEntry();
+        await storage.putConfirmation(entry);
+
+        const results = await Promise.all([
+          storage.consumeConfirmation(entry.id),
+          storage.consumeConfirmation(entry.id),
+        ]);
+
+        expect(results.filter((result) => result !== null)).toHaveLength(1);
+      });
+
+      it("returns null for an id that was never issued", async () => {
+        await storage.putConfirmation(confirmationEntry());
+        expect(await storage.consumeConfirmation("not-a-confirmation")).toBeNull();
+      });
+
+      it("keeps confirmations independent of one another", async () => {
+        const first = confirmationEntry({ id: "conf-1" });
+        const second = confirmationEntry({ id: "conf-2", tool: "export_patients" });
+        await storage.putConfirmation(first);
+        await storage.putConfirmation(second);
+
+        expect(await storage.consumeConfirmation("conf-1")).toEqual(first);
+        expect(await storage.consumeConfirmation("conf-2")).toEqual(second);
+      });
+
+      it("returns an expired entry rather than hiding it, so the caller can burn it", async () => {
+        const expired = confirmationEntry({
+          id: "conf-expired",
+          issuedAt: "2026-08-29T12:00:00.000Z",
+          expiresAt: "2026-08-29T12:02:00.000Z",
+        });
+        await storage.putConfirmation(expired);
+
+        // The adapter does not judge expiry — `/gate` does, *after* consuming.
+        expect(await storage.consumeConfirmation("conf-expired")).toEqual(expired);
+        expect(await storage.consumeConfirmation("conf-expired")).toBeNull();
+      });
+
+      it("evicts expired confirmations when a new one is stored", async () => {
+        await storage.putConfirmation(
+          confirmationEntry({
+            id: "conf-stale",
+            issuedAt: "2026-08-29T12:00:00.000Z",
+            expiresAt: "2026-08-29T12:02:00.000Z",
+          }),
+        );
+
+        await storage.putConfirmation(confirmationEntry({ id: "conf-fresh" }));
+
+        expect(await storage.consumeConfirmation("conf-stale")).toBeNull();
+        expect(await storage.consumeConfirmation("conf-fresh")).not.toBeNull();
+      });
+
+      it("does not let callers mutate stored state through returned objects", async () => {
+        const entry = confirmationEntry({ id: "conf-frozen" });
+        const stored = await storage.putConfirmation(entry);
+        stored.tool = "search_patients";
+
+        expect(await storage.consumeConfirmation("conf-frozen")).toMatchObject({
+          tool: "delete_patient",
+        });
       });
     });
   });

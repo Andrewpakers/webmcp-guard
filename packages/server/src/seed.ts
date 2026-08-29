@@ -12,13 +12,69 @@ import {
  * the console from then on — the seeder never touches a store that already has
  * rules, so an administrator who deletes a default rule keeps it deleted.
  *
- * Two of the four ship **disabled**: the confirmation and justification flows
- * only become real in Phase 5, and shipping them enabled would block judges in
- * a build that cannot yet render the confirmation modal.
+ * Enabled: the PHI transform (1), the export justification (2) and the
+ * destructive confirmation (3) — Phase 5 makes all three real.
+ *
+ * Disabled: the **posture pack** (4). `docs/05` is explicit that it ships off
+ * "so judges' environments aren't blocked", and it is toggled on live in the
+ * video. Both rules deny, so shipping them on would be the one change in this
+ * repo capable of breaking a judge's session before they see anything.
  */
 
 /** Ids are stable and readable so log entries and denial messages read well. */
 export const DEFAULT_POLICY_RULES: RuleDraft[] = [
+  /* -- posture pack (docs/05 §4) — DISABLED, ids prefixed `posture-` ------ */
+  {
+    /**
+     * Posture rules run before everything else: an unacceptable environment
+     * should fail before the guard reasons about tools or data at all.
+     */
+    id: "posture-deny-unknown-agent",
+    name: "Posture: deny unidentified agents",
+    enabled: false,
+    priority: 5,
+    match: { agents: [{ kind: "unknown" }] },
+    action: {
+      type: "deny",
+      message:
+        "This organization only accepts tool calls from agents it can identify, and this call " +
+        "arrived without an agent identity. Ask the person using this page to do it in the " +
+        "portal themselves, or to run you from an agent this organization recognizes.",
+    },
+  },
+  {
+    /**
+     * WebMCP shipped in Chrome 149 (behind a flag) — a browser older than that
+     * cannot expose the guarded tool channel in the first place, so a call
+     * claiming to come from one is either misconfigured or misreporting.
+     *
+     * The bound is written out as three brand matchers rather than a fuzzy
+     * "contains chrome" match: brand comparison is exact (see
+     * `sameBrand` in `@webmcp-guard/shared`), which keeps an administrator's
+     * rule from silently widening to browsers they never named. Client Hints
+     * report "Google Chrome" *and* "Chromium"; the UA fallback reports
+     * "HeadlessChrome" for a headless run.
+     */
+    id: "posture-deny-old-browser",
+    name: "Posture: deny browsers older than the WebMCP era",
+    enabled: false,
+    priority: 6,
+    match: {
+      agents: [
+        // Inclusive bound: 148 and older, i.e. everything before Chrome 149.
+        { kind: "browser", brand: "Chromium", maxVersion: 148 },
+        { kind: "browser", brand: "Google Chrome", maxVersion: 148 },
+        { kind: "browser", brand: "HeadlessChrome", maxVersion: 148 },
+      ],
+    },
+    action: {
+      type: "deny",
+      message:
+        "This browser is older than Chrome 149, which is the minimum this organization allows " +
+        "for agent tool calls. Ask the person using this page to update their browser and try " +
+        "again, or to perform the action in the portal themselves.",
+    },
+  },
   {
     id: "phi-transform-default",
     name: "Tokenize PHI on phi-tagged tools",
@@ -44,45 +100,34 @@ export const DEFAULT_POLICY_RULES: RuleDraft[] = [
     },
   },
   {
-    // Phase 5 enables this one and adds the justification evaluator behind it.
+    /**
+     * The bulk-disclosure gate. `minChars: 40` is the number `docs/05` names;
+     * the evaluator behind it lives in `justification.ts`.
+     */
     id: "export-requires-justification",
     name: "Export requires justification",
-    enabled: false,
+    enabled: true,
     priority: 20,
     match: { tools: ["export_patients"] },
     action: { type: "require-justification", minChars: 40 },
   },
   {
-    // Phase 5 enables this one together with the in-page confirmation modal.
+    /**
+     * The demo's dramatic beat: the agent asks to delete a patient, the person
+     * at the keyboard gets a modal, and whatever they choose is what happens.
+     * Tag-scoped, so it covers `delete_patient` and anything else a host tags
+     * `destructive` later. It replaces the Phase 2 blanket deny on
+     * `delete_patient`, which was deleted when this rule was switched on.
+     */
     id: "destructive-requires-confirmation",
     name: "Destructive tools require human confirmation",
-    enabled: false,
+    enabled: true,
     priority: 30,
     match: { tools: { tags: ["destructive"] } },
     action: {
       type: "require-confirmation",
       message:
         "Destructive actions on patient records have to be approved by the person using this page.",
-    },
-  },
-  {
-    /**
-     * TEMP (Phase 2). Stands in for the confirmation flow so the deny path is
-     * demonstrably real end to end before Phase 5 exists. Phase 5 deletes this
-     * rule and enables `destructive-requires-confirmation` instead.
-     */
-    id: "delete-patient-deny-temp",
-    name: "Delete patient blocked — TEMP (Phase 2)",
-    enabled: true,
-    priority: 40,
-    match: { tools: ["delete_patient"] },
-    action: {
-      type: "deny",
-      message:
-        "Deleting patient records from an agent is blocked by organization policy. If this " +
-        "record really has to be removed, ask the person you are working with to delete it in " +
-        "the portal (Patients → open the record → Delete), where a human confirms the deletion " +
-        "and it is audited.",
     },
   },
 ];

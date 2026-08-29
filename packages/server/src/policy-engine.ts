@@ -1,11 +1,17 @@
-import type {
-  GateVerdict,
-  PerClassTransform,
-  PolicyDocument,
-  Rule,
-  RuleAction,
-  RuleMatch,
+import {
+  brandMajorVersion,
+  sameBrand,
+  type AgentMatcher,
+  type GateVerdict,
+  type PerClassTransform,
+  type PolicyDocument,
+  type PostureSnapshot,
+  type Rule,
+  type RuleAction,
+  type RuleMatch,
 } from "@webmcp-guard/shared";
+
+import { postureBrands } from "./posture";
 
 /**
  * The policy engine: an ordered list of rules in, a verdict out
@@ -34,7 +40,7 @@ export const GATE_ACTION_TYPES = [
   "require-justification",
 ] as const;
 
-/** What the engine knows about a call. Posture and payload classes are not here yet. */
+/** What the engine knows about a call. Payload classes are not here yet. */
 export interface PolicyInput {
   app: string;
   tool: string;
@@ -42,6 +48,12 @@ export interface PolicyInput {
   toolTags?: string[];
   /** Session role from the host app (`docs/07` Phase 6). */
   role?: string;
+  /**
+   * The client's environment report, when one was sent. Advisory and spoofable
+   * (`docs/03-architecture.md` threat model) — the engine treats it as a
+   * *signal*, never as identity.
+   */
+  posture?: PostureSnapshot;
 }
 
 export interface PolicyDecision {
@@ -61,30 +73,82 @@ function isGateAction(action: RuleAction): boolean {
 }
 
 /**
- * Matchers this phase cannot evaluate, and therefore refuses to pretend it can.
+ * Matchers the engine cannot evaluate, and therefore refuses to pretend it can.
  *
- * - `agents` needs the posture snapshot and the browser-version comparison that
- *   Phase 5 adds;
- * - `dataClasses` needs the classifier that Phase 3 adds — a rule that fires
- *   "when the payload contains an SSN" cannot be decided before anything has
- *   been classified.
+ * `dataClasses` is the last one: a rule that fires "when the payload contains
+ * an SSN" would have to run *after* classification, but the gate decides
+ * *before* the tool has produced anything to classify. Wiring it would mean
+ * re-deciding the verdict at transform time, which is a policy-model change,
+ * not a bug fix (noted in the Phase 3 work-log entry).
  *
- * A rule carrying either matcher is skipped entirely: it neither allows nor
- * denies. That is the *permissive* choice, and it is only safe because the
- * seeded posture rule ships disabled (`docs/05` §4, judge safety) — a deny rule
- * that silently never fires would otherwise be worse than no rule at all. The
- * console must surface such rules as "not enforced yet"; see the report in the
- * work log. Phases 3 and 5 delete entries from this list as they teach the
- * engine to evaluate them.
+ * A rule carrying it is skipped entirely: it neither allows nor denies. That is
+ * the *permissive* choice, and the console surfaces such rules as "not
+ * enforced yet". Phase 5 removed `agents` from this list — posture matchers are
+ * evaluated for real now (see {@link agentMatches}).
  */
 export const UNEVALUATABLE_MATCHERS = [
-  "agents",
   "dataClasses",
 ] as const satisfies readonly (keyof RuleMatch)[];
 
 /** False when the rule uses a matcher this phase cannot decide. */
 export function isEvaluableMatch(match: RuleMatch): boolean {
   return UNEVALUATABLE_MATCHERS.every((key) => match[key] === undefined);
+}
+
+/** One posture matcher against one snapshot. */
+export function agentMatcherMatches(matcher: AgentMatcher, posture: PostureSnapshot): boolean {
+  switch (matcher.kind) {
+    case "unknown":
+      // "Unknown" means the client could not name an agent at all. An empty
+      // string is not an agent id either.
+      return posture.agentId === undefined || posture.agentId.trim().length === 0;
+
+    case "agent":
+      return posture.agentId === matcher.id;
+
+    case "browser": {
+      return postureBrands(posture).some((entry) => {
+        if (!sameBrand(entry.brand, matcher.brand)) return false;
+        if (matcher.minVersion === undefined && matcher.maxVersion === undefined) return true;
+
+        const major = brandMajorVersion(entry.version);
+        // A version range cannot be decided against a version that will not
+        // parse. Refusing to match is the same choice made everywhere else in
+        // this file: the engine never guesses on behalf of a policy author.
+        if (major === null) return false;
+        // Both bounds are **inclusive**: `maxVersion: 148` means "148 or older".
+        if (matcher.minVersion !== undefined && major < matcher.minVersion) return false;
+        if (matcher.maxVersion !== undefined && major > matcher.maxVersion) return false;
+        return true;
+      });
+    }
+  }
+}
+
+/**
+ * The `agents` matcher: a list of alternatives, **ORed** — the rule applies if
+ * any one of them describes this caller. (Everything at the `match` level is
+ * ANDed; a list inside one matcher has always meant "any of these".)
+ *
+ * **A rule with an `agents` matcher never fires when no posture was sent.**
+ * That is deliberate and it is the permissive direction:
+ *
+ *  - a client that reports nothing is *not* the same as a client that reports
+ *    "no agent" — treating silence as `{kind: "unknown"}` would let one absent
+ *    field deny every legacy or non-JS caller;
+ *  - the posture pack ships **disabled** for judge safety (`docs/05` §4), so
+ *    the honest failure mode of a posture rule has to be "does not fire", not
+ *    "fires for everyone";
+ *  - posture is advisory anyway (spoofable, `docs/03` threat model). A control
+ *    that can be turned off by omitting a field should not be the thing
+ *    standing between an agent and patient data — the tool-scoped rules are.
+ *
+ * An operator who wants "deny anything that does not report posture" writes a
+ * deny rule with no matchers and allows the callers they trust ahead of it.
+ */
+export function agentMatches(matchers: readonly AgentMatcher[], input: PolicyInput): boolean {
+  if (input.posture === undefined) return false;
+  return matchers.some((matcher) => agentMatcherMatches(matcher, input.posture as PostureSnapshot));
 }
 
 /**
@@ -96,6 +160,8 @@ export function ruleMatches(rule: Rule, input: PolicyInput): boolean {
   if (!isEvaluableMatch(match)) return false;
 
   if (match.apps !== undefined && !match.apps.includes(input.app)) return false;
+
+  if (match.agents !== undefined && !agentMatches(match.agents, input)) return false;
 
   if (match.tools !== undefined) {
     if (Array.isArray(match.tools)) {

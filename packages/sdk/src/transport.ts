@@ -1,4 +1,6 @@
 import {
+  type EffectivePolicy,
+  EffectivePolicyEnvelopeSchema,
   type GateRequest,
   type GateResponse,
   GateResponseEnvelopeSchema,
@@ -110,6 +112,48 @@ export async function postGate(
     throw new GuardStageError("gate", "response did not match the guard wire contract");
   }
   return parsed.data.payload;
+}
+
+/**
+ * `GET ${endpoint}/policies/effective` — what policy says about a tool, before
+ * it is registered (`docs/04` behavior 3).
+ *
+ * Returns `null` for **every** failure — offline, 404 from an older guard
+ * server, a body that does not match the wire contract. That is the
+ * availability-over-enforcement call this endpoint is allowed to make: it only
+ * shapes an input schema, and the gate re-decides the same policy server-side
+ * on every call regardless. A page that cannot reach the guard should still
+ * register its tools; the first call will fail closed and say so.
+ *
+ * Aborts are the one thing rethrown, so a caller can tell "the caller went
+ * away" from "the guard did not answer".
+ */
+export async function getEffectivePolicy(
+  config: TransportConfig,
+  query: { app: string; tool: string; tags?: readonly string[] },
+  signal?: AbortSignal,
+): Promise<EffectivePolicy | null> {
+  const params = new URLSearchParams({ app: query.app, tool: query.tool });
+  if (query.tags && query.tags.length > 0) params.set("tags", query.tags.join(","));
+
+  try {
+    const response = await config.fetchImpl(
+      `${config.endpoint}/policies/effective?${params.toString()}`,
+      {
+        method: "GET",
+        headers: { accept: "application/json" },
+        credentials: "same-origin",
+        signal,
+      },
+    );
+    if (!response.ok) return null;
+
+    const parsed = EffectivePolicyEnvelopeSchema.safeParse(await response.json());
+    return parsed.success ? parsed.data.payload : null;
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+    return null;
+  }
 }
 
 /** `POST ${endpoint}/transform` — classify, transform, and log the result. */

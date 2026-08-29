@@ -4,9 +4,9 @@
  *
  * Owns policy resolution, the classification/tokenization pipeline, the
  * encrypted token vault, the audit log writer, and the HTTP route handlers
- * mounted inside the host app (`/gate`, `/transform`, `/policies`, `/logs`,
- * `/stats`, `/tokens/reveal`). The confirmation and justification flows land in
- * Phase 5.
+ * mounted inside the host app (`/gate`, `/transform`, `/policies`,
+ * `/policies/effective`, `/logs`, `/stats`, `/tokens/reveal`) — including the
+ * Phase 5 posture, one-time-confirmation and justification flows.
  */
 export const PACKAGE_NAME = "@webmcp-guard/server" as const;
 
@@ -79,6 +79,8 @@ export {
 export {
   GATE_ACTION_TYPES,
   UNEVALUATABLE_MATCHERS,
+  agentMatcherMatches,
+  agentMatches,
   isEvaluableMatch,
   orderRules,
   resolvePolicy,
@@ -90,14 +92,42 @@ export {
 export { DEFAULT_POLICY_RULES, seedDefaultPolicy } from "./seed";
 
 export {
+  CONFIRMATION_TTL_MS,
+  canonicalJson,
+  hashCallArgs,
+  validateConfirmation,
+  type ConfirmationFailure,
+} from "./confirmation";
+
+export {
+  DEFAULT_JUSTIFICATION_MIN_CHARS,
+  FILLER_JUSTIFICATIONS,
+  JUSTIFICATION_ARG,
+  MAX_JUSTIFICATION_CHARS,
+  heuristicJustificationEvaluator,
+  isKeyboardMash,
+  isSingleRepeatedCharacter,
+  stripJustification,
+  type JustificationEvaluation,
+  type JustificationEvaluationInput,
+  type JustificationEvaluator,
+  type SyncJustificationEvaluator,
+} from "./justification";
+
+export {
+  EVALUATOR_FALLBACK_NOTE,
+  HUMAN_APPROVED_MESSAGE,
   confirmationMessage,
+  confirmationRejectedMessage,
   defaultDenyMessage,
   denyMessage,
+  humanApprovedNote,
+  justificationAcceptedNote,
   justificationMessage,
   verdictMessage,
 } from "./messages";
 
-export { agentInfoFromPosture, pickBrand } from "./posture";
+export { agentInfoFromPosture, pickBrand, postureBrands } from "./posture";
 
 export { UNAUTHORIZED_MESSAGE, bearerToken, isAdminRequest, secretsMatch } from "./auth";
 

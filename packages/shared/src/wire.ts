@@ -23,6 +23,8 @@ export const BrowserBrandSchema = z
   })
   .strict();
 
+export type BrowserBrand = z.infer<typeof BrowserBrandSchema>;
+
 /**
  * Best-effort environment signals collected by the SDK. Every field is
  * spoofable; the server decides what to do with them, the client only reports.
@@ -139,6 +141,37 @@ export const TransformResponseSchema = z
 export type TransformResponse = z.infer<typeof TransformResponseSchema>;
 
 /**
+ * `GET /policies/effective?app=&tool=&tags=` — the only policy read that is not
+ * admin-gated.
+ *
+ * The SDK calls it at registration time (and on a periodic refresh) so it can
+ * rewrite a tool's `inputSchema` before an agent ever sees it
+ * (`docs/04-sdk-requirements.md` behavior 3). It is reachable by exactly whoever
+ * can reach the page, like `/gate`, so it answers with the **minimum** a client
+ * needs to shape a schema: no rule ids, no names, no messages, no matchers.
+ * Enforcement never depends on it — the gate re-decides every call server-side.
+ */
+export const EffectivePolicySchema = z
+  .object({
+    /** Inject a required `justification` string property into `inputSchema`. */
+    requiresJustification: z.boolean(),
+    /** Minimum justification length, when one is required. `null` otherwise. */
+    minChars: z.number().int().positive().nullable(),
+    /** The call will need in-page human approval. Advisory: no schema change. */
+    requiresConfirmation: z.boolean(),
+    /**
+     * Reserved for `docs/04` behavior 3 ("if policy verdict for the tool is
+     * `disabled`, do not register it at all"). The policy model has no
+     * `disabled` verdict yet, so the server always answers `false`; the field
+     * exists so adding one later is not a wire-breaking change.
+     */
+    disabled: z.boolean(),
+  })
+  .strict();
+
+export type EffectivePolicy = z.infer<typeof EffectivePolicySchema>;
+
+/**
  * Wraps a payload in the versioned envelope every guard request and response
  * travels in: `{ "version": 1, "payload": { ... } }`.
  */
@@ -155,8 +188,10 @@ export const GateRequestEnvelopeSchema = wireEnvelope(GateRequestSchema);
 export const GateResponseEnvelopeSchema = wireEnvelope(GateResponseSchema);
 export const TransformRequestEnvelopeSchema = wireEnvelope(TransformRequestSchema);
 export const TransformResponseEnvelopeSchema = wireEnvelope(TransformResponseSchema);
+export const EffectivePolicyEnvelopeSchema = wireEnvelope(EffectivePolicySchema);
 
 export type GateRequestEnvelope = z.infer<typeof GateRequestEnvelopeSchema>;
 export type GateResponseEnvelope = z.infer<typeof GateResponseEnvelopeSchema>;
 export type TransformRequestEnvelope = z.infer<typeof TransformRequestEnvelopeSchema>;
 export type TransformResponseEnvelope = z.infer<typeof TransformResponseEnvelopeSchema>;
+export type EffectivePolicyEnvelope = z.infer<typeof EffectivePolicyEnvelopeSchema>;

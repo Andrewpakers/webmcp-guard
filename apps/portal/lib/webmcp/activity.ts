@@ -9,7 +9,9 @@ import type { GuardEvent } from "@webmcp-guard/sdk";
  *
  * One row per pipeline event, so a viewer watches a call move through the guard
  * rather than seeing a single opaque "done": `allow → executed → transformed`
- * for a permitted read, `deny → blocked` for the delete the policy stops.
+ * for a permitted read, `deny → blocked` for the delete the policy stops, and
+ * `require-confirmation → declined → blocked` when the person at the keyboard
+ * says no.
  */
 
 /** Green = the agent got something, red = it did not, slate = in flight. */
@@ -26,6 +28,9 @@ export function newestFirst(events: readonly GuardEvent[]): GuardEvent[] {
  */
 export function badgeLabel(event: GuardEvent): string {
   if (event.type === "gate") return event.verdict ?? "gate";
+  // "approved" / "declined" reads better on the badge than "confirmation", and
+  // the human decision is the whole point of that row.
+  if (event.type === "confirmation") return event.decision ?? "confirmation";
   return event.type;
 }
 
@@ -33,6 +38,10 @@ export function badgeTone(event: GuardEvent): ActivityTone {
   if (event.type === "blocked" || event.type === "error") return "danger";
   // A gate that did not say "allow" is the deny beat; never show it as routine.
   if (event.type === "gate") return event.verdict === "allow" ? "ok" : "danger";
+  if (event.type === "confirmation") {
+    if (event.decision === "approved") return "ok";
+    return event.decision === "declined" ? "danger" : "neutral";
+  }
   if (event.type === "transformed") return "ok";
   return "neutral";
 }
@@ -44,6 +53,12 @@ export function stageDescription(event: GuardEvent): string {
       return event.verdict === "allow"
         ? "Policy gate cleared this call."
         : "Policy gate stopped this call.";
+    case "confirmation":
+      return event.decision === "approved"
+        ? "The person at the keyboard approved this call."
+        : event.decision === "declined"
+          ? "The person at the keyboard declined this call."
+          : "Waiting on the person at the keyboard.";
     case "blocked":
       return "Blocked before the tool ran.";
     case "executed":

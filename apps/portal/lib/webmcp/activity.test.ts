@@ -43,12 +43,39 @@ describe("badge", () => {
     expect(badgeTone(event({ type: "blocked", verdict: "deny" }))).toBe("danger");
     expect(badgeTone(event({ type: "error" }))).toBe("danger");
   });
+
+  /**
+   * The confirmation row is the demo's dramatic beat: the drawer has to show
+   * *what the person chose*, not that a confirmation happened.
+   */
+  it("labels a confirmation with the human's decision", () => {
+    expect(badgeLabel(event({ type: "confirmation", decision: "approved" }))).toBe("approved");
+    expect(badgeLabel(event({ type: "confirmation", decision: "declined" }))).toBe("declined");
+    expect(badgeLabel(event({ type: "confirmation" }))).toBe("confirmation");
+  });
+
+  it("colours an approval green and a decline red", () => {
+    expect(badgeTone(event({ type: "confirmation", decision: "approved" }))).toBe("ok");
+    expect(badgeTone(event({ type: "confirmation", decision: "declined" }))).toBe("danger");
+    expect(badgeTone(event({ type: "confirmation", decision: "cancelled" }))).toBe("neutral");
+    expect(badgeTone(event({ type: "confirmation" }))).toBe("neutral");
+  });
 });
 
 describe("detail line", () => {
   it("prefers what the guard reported", () => {
     const detail = "Deleting patient records from an agent is blocked by organization policy.";
     expect(eventDetail(event({ type: "blocked", detail }))).toBe(detail);
+  });
+
+  it("says who decided on a confirmation row", () => {
+    expect(eventDetail(event({ type: "confirmation", decision: "approved" }))).toContain(
+      "person at the keyboard approved",
+    );
+    expect(eventDetail(event({ type: "confirmation", decision: "declined" }))).toContain(
+      "person at the keyboard declined",
+    );
+    expect(eventDetail(event({ type: "confirmation" }))).toContain("Waiting on the person");
   });
 
   it("describes the stage when the guard said nothing", () => {

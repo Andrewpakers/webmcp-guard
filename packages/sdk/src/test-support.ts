@@ -30,6 +30,8 @@ export class StubModelContext {
   readonly calls: RegisterCall[] = [];
   /** When set, `registerTool` rejects with this error. */
   rejectWith?: Error;
+  /** Rejects only the next N registrations, then behaves normally. */
+  rejectNextCalls = 0;
 
   /** The tools currently exposed to an agent. */
   get tools(): Map<string, WebMcpToolDefinition> {
@@ -47,6 +49,10 @@ export class StubModelContext {
 
   registerTool(tool: WebMcpToolDefinition, options?: WebMcpRegisterToolOptions): Promise<void> {
     if (this.rejectWith) return Promise.reject(this.rejectWith);
+    if (this.rejectNextCalls > 0) {
+      this.rejectNextCalls -= 1;
+      return Promise.reject(new Error("the browser rejected this registration"));
+    }
     // Mirrors the real receiver requirement: a detached `registerTool` would
     // lose `this` and never record the call.
     if (!(this instanceof StubModelContext)) {
@@ -137,10 +143,15 @@ export type FetchRoute = (call: FetchCall) => Response | Promise<Response>;
 
 export interface FetchStub {
   fetchImpl: typeof fetch;
+  /** Every request the SDK made, registration policy reads included. */
   calls: FetchCall[];
   /** Calls to `${endpoint}/gate`, in order. */
   gateCalls: FetchCall[];
   transformCalls: FetchCall[];
+  /** Registration-time `${endpoint}/policies/effective` reads. */
+  policyCalls: FetchCall[];
+  /** Gate + transform only: the round trips one tool call makes. */
+  pipelineCalls: FetchCall[];
 }
 
 /** JSON body wrapped in the versioned envelope, with an overridable version. */
@@ -154,12 +165,38 @@ export function envelopeResponse(
   });
 }
 
+/** What `GET /policies/effective` answers when a test does not say otherwise. */
+export function effectivePolicyResponse(
+  overrides: Partial<{
+    requiresJustification: boolean;
+    minChars: number | null;
+    requiresConfirmation: boolean;
+    disabled: boolean;
+  }> = {},
+): Response {
+  return envelopeResponse({
+    requiresJustification: false,
+    minChars: null,
+    requiresConfirmation: false,
+    disabled: false,
+    ...overrides,
+  });
+}
+
 /**
- * A `fetch` double that routes on the URL suffix and records every call.
+ * A `fetch` double that routes on the URL and records every call.
  * A route may return a `Response` or throw to simulate a network failure.
+ *
+ * `policies` defaults to "nothing special about this tool", so a test that only
+ * cares about the pipeline does not have to describe registration policy.
  */
-export function createFetchStub(routes: { gate?: FetchRoute; transform?: FetchRoute }): FetchStub {
+export function createFetchStub(routes: {
+  gate?: FetchRoute;
+  transform?: FetchRoute;
+  policies?: FetchRoute;
+}): FetchStub {
   const calls: FetchCall[] = [];
+  const isPolicyCall = (url: string) => url.includes("/policies/effective");
 
   const fetchImpl = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
@@ -178,7 +215,9 @@ export function createFetchStub(routes: { gate?: FetchRoute; transform?: FetchRo
       ? routes.gate
       : url.endsWith("/transform")
         ? routes.transform
-        : undefined;
+        : isPolicyCall(url)
+          ? (routes.policies ?? (() => effectivePolicyResponse()))
+          : undefined;
     if (!route) throw new Error(`unexpected fetch to ${url}`);
     return route(call);
   }) as unknown as typeof fetch;
@@ -192,6 +231,12 @@ export function createFetchStub(routes: { gate?: FetchRoute; transform?: FetchRo
     get transformCalls() {
       return calls.filter((call) => call.url.endsWith("/transform"));
     },
+    get policyCalls() {
+      return calls.filter((call) => isPolicyCall(call.url));
+    },
+    get pipelineCalls() {
+      return calls.filter((call) => !isPolicyCall(call.url));
+    },
   };
 }
 
@@ -200,6 +245,120 @@ export function abortError(): Error {
   const error = new Error("The operation was aborted.");
   error.name = "AbortError";
   return error;
+}
+
+/* --------------------------------------------------------------- fake DOM -- */
+
+/**
+ * The smallest DOM the confirmation modal actually uses.
+ *
+ * jsdom is not a dependency of this workspace, and pulling it in for one dialog
+ * would be a heavier lie than this: the modal touches `createElement`,
+ * `appendChild`, `setAttribute`, `textContent`, `style.cssText`, `remove`,
+ * `focus` and two event listeners, and every one of those is modelled here
+ * exactly as the browser behaves. The real thing is driven for real by the
+ * headless-Chromium e2e run.
+ */
+export class FakeElement {
+  readonly children: FakeElement[] = [];
+  readonly attributes = new Map<string, string>();
+  style = { cssText: "" };
+  textContent: string | null = null;
+  /** True once `remove()` was called — the browser would have unlinked it. */
+  removed = false;
+  focused = false;
+  private readonly listeners = new Map<string, Set<() => void>>();
+
+  constructor(readonly tag: string) {}
+
+  setAttribute(name: string, value: string): void {
+    this.attributes.set(name, value);
+  }
+
+  getAttribute(name: string): string | null {
+    return this.attributes.get(name) ?? null;
+  }
+
+  appendChild(child: FakeElement): FakeElement {
+    this.children.push(child);
+    return child;
+  }
+
+  addEventListener(type: string, listener: () => void): void {
+    const set = this.listeners.get(type) ?? new Set();
+    set.add(listener);
+    this.listeners.set(type, set);
+  }
+
+  removeEventListener(type: string, listener: () => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  remove(): void {
+    this.removed = true;
+  }
+
+  focus(): void {
+    this.focused = true;
+  }
+
+  /** Fires every listener for `type`, the way a real click would. */
+  dispatch(type: string): void {
+    for (const listener of [...(this.listeners.get(type) ?? [])]) listener();
+  }
+
+  click(): void {
+    this.dispatch("click");
+  }
+
+  /** Depth-first search by `data-testid`, ignoring removed subtrees. */
+  find(testId: string): FakeElement | null {
+    if (this.removed) return null;
+    if (this.attributes.get("data-testid") === testId) return this;
+    for (const child of this.children) {
+      const found = child.find(testId);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** Every element in this subtree, removed ones included. */
+  descendants(): FakeElement[] {
+    return this.children.flatMap((child) => [child, ...child.descendants()]);
+  }
+}
+
+export class FakeDocument {
+  readonly body = new FakeElement("body");
+  private readonly listeners = new Map<string, Set<(event: { key?: string }) => void>>();
+
+  createElement(tag: string): FakeElement {
+    return new FakeElement(tag);
+  }
+
+  addEventListener(type: string, listener: (event: { key?: string }) => void): void {
+    const set = this.listeners.get(type) ?? new Set();
+    set.add(listener);
+    this.listeners.set(type, set);
+  }
+
+  removeEventListener(type: string, listener: (event: { key?: string }) => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  /** Simulates a keypress reaching the document. */
+  press(key: string): void {
+    for (const listener of [...(this.listeners.get("keydown") ?? [])]) listener({ key });
+  }
+
+  /** How many `keydown` listeners are still attached — leak detection. */
+  get keydownListeners(): number {
+    return this.listeners.get("keydown")?.size ?? 0;
+  }
+
+  find(testId: string): FakeElement | null {
+    return this.body.find(testId);
+  }
 }
 
 /* ------------------------------------------------------------------ tools -- */

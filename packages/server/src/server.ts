@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   DataClassSchema,
+  EffectivePolicySchema,
   GateRequestSchema,
   GateResponseSchema,
   GateVerdictSchema,
@@ -15,8 +16,13 @@ import {
   RuleMatchSchema,
   TransformRequestSchema,
   TransformResponseSchema,
+  type ConfirmationEntry,
   type DataClass,
+  type GateRequest,
+  type GateVerdict,
   type GuardStorage,
+  type JsonObject,
+  type LogJustificationVerdict,
   type LogQuery,
   type LogRecord,
   type PerClassTransform,
@@ -27,10 +33,28 @@ import { z } from "zod";
 
 import { UNAUTHORIZED_MESSAGE, isAdminRequest } from "./auth";
 import { buildNameMatcher, classify, orderClasses, type ClassifierOptions } from "./classify";
+import { CONFIRMATION_TTL_MS, hashCallArgs, validateConfirmation } from "./confirmation";
 import { detokenize } from "./detokenize";
 import { jsonError, jsonPayload, parseEnvelope, parseWith, queryObject, truncate } from "./http";
-import { verdictMessage } from "./messages";
-import { resolvePolicy } from "./policy-engine";
+import {
+  DEFAULT_JUSTIFICATION_MIN_CHARS,
+  heuristicJustificationEvaluator,
+  stripJustification,
+  type JustificationEvaluation,
+  type JustificationEvaluationInput,
+  type JustificationEvaluator,
+} from "./justification";
+import {
+  EVALUATOR_FALLBACK_NOTE,
+  HUMAN_APPROVED_MESSAGE,
+  confirmationMessage,
+  confirmationRejectedMessage,
+  humanApprovedNote,
+  justificationAcceptedNote,
+  justificationMessage,
+  verdictMessage,
+} from "./messages";
+import { resolvePolicy, type PolicyDecision } from "./policy-engine";
 import { agentInfoFromPosture } from "./posture";
 import { seedDefaultPolicy } from "./seed";
 import { createTokenizer } from "./tokenize";
@@ -50,8 +74,12 @@ import { transformValue } from "./transform";
  * ```
  */
 
-/** Ids reserved by the routing table, so `PUT /policies/reorder` stays unambiguous. */
-export const RESERVED_RULE_IDS = ["reorder"] as const;
+/**
+ * Ids reserved by the routing table, so `POST /policies/reorder` and
+ * `GET /policies/effective` stay unambiguous. Reserving them also stops a rule
+ * from being created that would shadow — or be shadowed by — a route.
+ */
+export const RESERVED_RULE_IDS = ["reorder", "effective"] as const;
 
 const RuleIdSchema = z
   .string()
@@ -122,6 +150,14 @@ const StatsQueryParamsSchema = z.object({
   until: IsoTimeSchema.optional(),
 });
 
+/** `GET /policies/effective?app=…&tool=…&tags=read,phi`. */
+const EffectiveQueryParamsSchema = z.object({
+  app: z.string().min(1).max(120),
+  tool: z.string().min(1).max(120),
+  /** Comma-separated, matching the `tags` the SDK registered the tool with. */
+  tags: z.string().max(500).optional(),
+});
+
 /** Default lifetime of a resolved name dictionary, in milliseconds. */
 export const NAME_DICTIONARY_TTL_MS = 30_000;
 
@@ -158,6 +194,18 @@ export interface GuardServerConfig {
   mrnPattern?: RegExp;
   /** Overrides {@link NAME_DICTIONARY_TTL_MS}. */
   nameDictionaryTtlMs?: number;
+  /**
+   * Judges the `justification` an agent supplies for a `require-justification`
+   * rule (`docs/04-sdk-requirements.md`). Defaults to
+   * {@link heuristicJustificationEvaluator}.
+   *
+   * The seam an LLM evaluator plugs into (Phase 5 stretch, **not built**: see
+   * the work log). Whatever is plugged in, the guard treats a throw — or a
+   * malformed answer — as evaluator downtime and decides with the heuristic
+   * instead, recording the fallback on the audit entry. An evaluator outage
+   * must never be able to block every export in the building.
+   */
+  evaluator?: JustificationEvaluator;
 }
 
 /** The four Next.js App Router verbs, plus the preflight handler. */
@@ -322,6 +370,54 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
     return orderClasses(lists.flat());
   }
 
+  // ---- justification evaluator --------------------------------------------
+
+  const evaluator = config.evaluator ?? heuristicJustificationEvaluator;
+
+  function isEvaluation(value: unknown): value is JustificationEvaluation {
+    if (typeof value !== "object" || value === null) return false;
+    const candidate = value as { verdict?: unknown; reason?: unknown };
+    return (
+      (candidate.verdict === "pass" || candidate.verdict === "fail") &&
+      typeof candidate.reason === "string"
+    );
+  }
+
+  /**
+   * Runs the configured evaluator, falling back to the heuristic when it throws
+   * or answers with something that is not an evaluation.
+   *
+   * `docs/04`: "Never let evaluator downtime block the demo: on error, fall
+   * back to heuristic and log the fallback." The fallback is recorded on the
+   * audit entry, not just on the console, so an administrator can tell which
+   * decisions their evaluator actually made.
+   */
+  async function evaluateJustification(
+    input: JustificationEvaluationInput,
+  ): Promise<{ evaluation: JustificationEvaluation; fellBack: boolean }> {
+    if (evaluator === heuristicJustificationEvaluator) {
+      return { evaluation: heuristicJustificationEvaluator.evaluate(input), fellBack: false };
+    }
+
+    try {
+      const answer = (await evaluator.evaluate(input)) as unknown;
+      if (isEvaluation(answer)) return { evaluation: answer, fellBack: false };
+      console.warn("[webmcp-guard] justification evaluator returned an unusable answer");
+    } catch (error) {
+      console.warn("[webmcp-guard] justification evaluator threw; using the heuristic", error);
+    }
+
+    return { evaluation: heuristicJustificationEvaluator.evaluate(input), fellBack: true };
+  }
+
+  /** The minimum length the matched rule asks for, or the shipped default. */
+  function justificationMinChars(rule: Rule | null): number {
+    if (rule !== null && rule.action.type === "require-justification") {
+      return rule.action.minChars ?? DEFAULT_JUSTIFICATION_MIN_CHARS;
+    }
+    return DEFAULT_JUSTIFICATION_MIN_CHARS;
+  }
+
   // ---- agent-facing routes -------------------------------------------------
 
   /**
@@ -336,6 +432,154 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
    * (`docs/03-architecture.md` → threat model). Nothing in this repo may
    * describe these two routes as authenticated.
    */
+  /**
+   * The gate's decision about one call, before anything is written down.
+   *
+   * It exists because two verdicts are *conversations*, not answers:
+   * `require-confirmation` can end as an allow (the person approved) or a deny
+   * (the approval was replayed), and `require-justification` can end as an
+   * allow (the evaluator passed it) or as another ask. The rest of `/gate` —
+   * detokenization, the audit entry, the response — is written once, against
+   * this shape, so those two flows cannot each grow their own copy of it.
+   */
+  interface GateOutcome {
+    /** What the agent is told. */
+    verdict: GateVerdict;
+    /** True when the tool may run: detokenize, log `pending`, return args. */
+    allowed: boolean;
+    /** Arguments the tool should run on, before detokenization. */
+    args: JsonObject;
+    /** Agent-legible explanation, for every verdict that needs one. */
+    message?: string;
+    /** A freshly minted one-time id, on a `require-confirmation`. */
+    confirmationId?: string;
+    /** Audit-only sentence. Never returned to the agent. */
+    auditNote?: string;
+    /** What the agent wrote, and what the evaluator made of it. */
+    justification?: { text: string; verdict: LogJustificationVerdict };
+  }
+
+  /**
+   * `require-confirmation`: mint an approval, or spend one.
+   *
+   * The two halves of the flow (`docs/03-architecture.md` → "the SDK renders an
+   * in-page modal the human must approve; the server issues a one-time
+   * confirmation id so the approval can't be replayed").
+   */
+  async function confirmationOutcome(
+    gate: GateRequest,
+    decision: PolicyDecision,
+    callId: string,
+    presented: ConfirmationEntry | null,
+  ): Promise<GateOutcome> {
+    const rule = decision.gateRule;
+
+    if (gate.confirmationId === undefined) {
+      const confirmationId = randomUUID();
+      const issuedAt = new Date();
+
+      await storage.putConfirmation({
+        id: confirmationId,
+        app: gate.app,
+        tool: gate.tool,
+        // Binds the approval to the exact call the human is about to be shown.
+        argsHash: hashCallArgs(gate.app, gate.tool, gate.args),
+        callId,
+        issuedAt: issuedAt.toISOString(),
+        expiresAt: new Date(issuedAt.getTime() + CONFIRMATION_TTL_MS).toISOString(),
+      });
+
+      return {
+        verdict: "require-confirmation",
+        allowed: false,
+        args: gate.args,
+        confirmationId,
+        ...(rule !== null ? { message: confirmationMessage(rule) } : {}),
+      };
+    }
+
+    // `presented` is what `consumeConfirmation` returned — the id is already
+    // spent by the time this runs, however this ends.
+    const failure = validateConfirmation(presented, gate, Date.now());
+    if (failure !== null) {
+      return {
+        verdict: "deny",
+        allowed: false,
+        args: gate.args,
+        message: confirmationRejectedMessage(failure, gate.tool),
+        auditNote: `A confirmation was presented and refused (${failure}).`,
+      };
+    }
+
+    return {
+      verdict: "allow",
+      allowed: true,
+      args: gate.args,
+      message: HUMAN_APPROVED_MESSAGE,
+      auditNote: humanApprovedNote(rule, truncate(gate.confirmationId, 64)),
+    };
+  }
+
+  /** `require-justification`: read it, judge it, and strip it before the tool runs. */
+  async function justificationOutcome(
+    gate: GateRequest,
+    decision: PolicyDecision,
+  ): Promise<GateOutcome> {
+    const rule = decision.gateRule;
+    const minChars = justificationMinChars(rule);
+
+    // Stripped *before* anything else touches the arguments: the justification
+    // is guard metadata, so it must never be detokenized, never reach the
+    // tool, and never be classified as part of the tool's payload.
+    const { args, justification } = stripJustification(gate.args);
+
+    if (justification === null || justification.trim().length === 0) {
+      return {
+        verdict: "require-justification",
+        allowed: false,
+        args: gate.args,
+        message: justificationMessage(rule, minChars, gate.tool),
+      };
+    }
+
+    const { evaluation, fellBack } = await evaluateJustification({
+      tool: gate.tool,
+      args,
+      justification,
+      context: {
+        app: gate.app,
+        minChars,
+        ...(rule !== null ? { ruleId: rule.id } : {}),
+        ...(gate.sessionContext !== undefined ? { session: gate.sessionContext } : {}),
+      },
+    });
+
+    const fallbackNote = fellBack ? ` ${EVALUATOR_FALLBACK_NOTE}` : "";
+    const record = { text: justification, verdict: evaluation };
+
+    if (evaluation.verdict === "fail") {
+      return {
+        verdict: "require-justification",
+        allowed: false,
+        args: gate.args,
+        message: justificationMessage(rule, minChars, gate.tool, evaluation.reason),
+        auditNote: fellBack ? EVALUATOR_FALLBACK_NOTE : undefined,
+        justification: record,
+      };
+    }
+
+    return {
+      verdict: "allow",
+      allowed: true,
+      // The tool runs on the arguments *without* the justification: the
+      // portal's schemas are `additionalProperties: false`, and the field was
+      // never part of the tool's contract in the first place.
+      args,
+      auditNote: `${justificationAcceptedNote(evaluation.reason)}${fallbackNote}`,
+      justification: record,
+    };
+  }
+
   async function handleGate(request: Request, cors: Record<string, string>): Promise<Response> {
     const parsed = await parseEnvelope(request, GateRequestSchema, cors);
     if (!parsed.ok) return parsed.response;
@@ -347,13 +591,54 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
       tool: gate.tool,
       toolTags: gate.toolTags,
       role: gate.sessionContext?.role,
+      // Advisory environment signals; the engine decides what they are worth.
+      posture: gate.posture,
     });
 
     // Every call gets an id, including denied ones: the SDK reports it back and
     // the console can point at one audit row for the whole interaction.
     const callId = randomUUID();
-    const message = verdictMessage(decision, gate.tool);
-    const allowed = decision.verdict === "allow";
+
+    /**
+     * A presented confirmation id is spent **the moment it is presented** —
+     * before the hash is compared, before expiry is checked, and whatever the
+     * current verdict turns out to be.
+     *
+     * Burning first is the whole anti-replay property. If validation came
+     * first, a failed attempt would leave the id alive, and an attacker who
+     * captured one could keep trying different arguments against it until
+     * something stuck. This way the first use of an id is the only use, full
+     * stop, and a tampered replay destroys the approval it was trying to
+     * subvert.
+     */
+    const presented =
+      gate.confirmationId === undefined
+        ? null
+        : await storage.consumeConfirmation(gate.confirmationId);
+
+    let outcome: GateOutcome;
+    if (decision.verdict === "require-confirmation") {
+      outcome = await confirmationOutcome(gate, decision, callId, presented);
+    } else if (decision.verdict === "require-justification") {
+      outcome = await justificationOutcome(gate, decision);
+    } else {
+      const message = verdictMessage(decision, gate.tool);
+      outcome = {
+        verdict: decision.verdict,
+        allowed: decision.verdict === "allow",
+        args: gate.args,
+        ...(message !== undefined ? { message } : {}),
+        // A stale id (the policy changed under a pending approval) is spent all
+        // the same — it was consumed above — and the audit trail says so.
+        ...(gate.confirmationId !== undefined
+          ? {
+              auditNote:
+                "A confirmation id was presented for a call that no longer requires " +
+                "confirmation. It was spent, not honoured.",
+            }
+          : {}),
+      };
+    }
 
     /**
      * Inbound transform: tokens in the agent's arguments become real values,
@@ -362,13 +647,13 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
      * vault, so the gate cannot be used as a detokenization oracle by calling a
      * tool the caller knows will be blocked.
      */
-    let executableArgs = gate.args;
+    let executableArgs = outcome.args;
     let inboundClasses: DataClass[] = [];
     /** Set when the gate swapped tokens for real values, for the audit trail. */
     let detokenizeNote: string | undefined;
 
-    if (allowed) {
-      const detokenized = await detokenize(gate.args, async (token) => {
+    if (outcome.allowed) {
+      const detokenized = await detokenize(outcome.args, async (token) => {
         const entry = await storage.getVaultEntry(token);
         return entry === null ? null : tokenizer.open(entry);
       });
@@ -390,36 +675,109 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
       inboundClasses = classify(executableArgs, await classifierOptions()).classes;
     }
 
+    const auditMessage = [outcome.message, outcome.auditNote, detokenizeNote]
+      .filter((part): part is string => part !== undefined && part.length > 0)
+      .join(" ");
+
     await storage.appendLog(
       LogRecordSchema.parse({
         id: callId,
         timestamp: new Date().toISOString(),
         app: gate.app,
         tool: gate.tool,
-        verdict: decision.verdict,
+        verdict: outcome.verdict,
         agent: agentInfoFromPosture(gate.posture),
         session: gate.sessionContext,
         dataClasses: inboundClasses,
         ruleIds: decision.ruleIds,
         durationMs: 0,
         payloads: {
-          // As received (tokens and all) versus what the tool actually runs on.
+          // As received (justification, tokens and all) versus what the tool
+          // actually runs on. The audit trail keeps what the agent sent even
+          // when the pipeline strips it.
           argsBefore: gate.args,
           argsAfter: executableArgs,
         },
-        message: message ?? detokenizeNote,
+        ...(outcome.justification !== undefined
+          ? {
+              justification: outcome.justification.text,
+              justificationVerdict: outcome.justification.verdict,
+            }
+          : {}),
+        ...(auditMessage.length > 0 ? { message: auditMessage } : {}),
         // An allowed call is still in flight; anything else ended right here.
-        status: allowed ? "pending" : "complete",
+        status: outcome.allowed ? "pending" : "complete",
       } satisfies LogRecord),
     );
 
     return jsonPayload(
       GateResponseSchema.parse({
         callId,
-        verdict: decision.verdict,
-        ...(allowed ? { args: executableArgs } : {}),
-        ...(message !== undefined ? { message } : {}),
+        verdict: outcome.verdict,
+        ...(outcome.allowed ? { args: executableArgs } : {}),
+        ...(outcome.message !== undefined ? { message: outcome.message } : {}),
+        ...(outcome.confirmationId !== undefined ? { confirmationId: outcome.confirmationId } : {}),
         ruleIds: decision.ruleIds,
+      }),
+      200,
+      cors,
+    );
+  }
+
+  /**
+   * `GET /policies/effective` — **not admin-gated**, on purpose.
+   *
+   * The SDK needs it before it can register a tool, from the page, with no
+   * credentials but the host app's own session — the same trust position
+   * `/gate` occupies (see the note above `handleGate`). So it answers with the
+   * smallest thing that lets a client shape an input schema: two booleans and a
+   * number. No rule ids, no rule names, no messages, no matchers, nothing about
+   * rules that did *not* match. Someone who can call this learns "this tool
+   * wants a justification of at least 40 characters" — which is exactly what
+   * the tool's own schema is about to tell every agent anyway.
+   */
+  async function handleEffectivePolicy(
+    request: Request,
+    cors: Record<string, string>,
+  ): Promise<Response> {
+    if (request.method.toUpperCase() !== "GET") return methodNotAllowed(["GET"], cors);
+
+    const url = new URL(request.url);
+    const parsed = parseWith(
+      EffectiveQueryParamsSchema,
+      queryObject(url),
+      "effective policy query",
+      cors,
+    );
+    if (!parsed.ok) return parsed.response;
+
+    const { app, tool, tags } = parsed.value;
+    const toolTags =
+      tags === undefined
+        ? undefined
+        : tags
+            .split(",")
+            .map((tag) => tag.trim())
+            .filter((tag) => tag.length > 0);
+
+    const policy = await storage.getPolicy();
+    // No posture on this path: registration happens before any call, and a
+    // posture rule that would deny the *call* has no bearing on the *schema*.
+    const decision = resolvePolicy(policy, {
+      app,
+      tool,
+      ...(toolTags !== undefined && toolTags.length > 0 ? { toolTags } : {}),
+    });
+
+    const requiresJustification = decision.verdict === "require-justification";
+
+    return jsonPayload(
+      EffectivePolicySchema.parse({
+        requiresJustification,
+        minChars: requiresJustification ? justificationMinChars(decision.gateRule) : null,
+        requiresConfirmation: decision.verdict === "require-confirmation",
+        // Reserved: the policy model has no `disabled` verdict yet.
+        disabled: false,
       }),
       200,
       cors,
@@ -805,6 +1163,13 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
 
     if (first === "transform" && second === undefined) {
       return method === "POST" ? handleTransform(request, cors) : methodNotAllowed(["POST"], cors);
+    }
+
+    // Reachable by the page, like /gate — and therefore matched *before* the
+    // admin-token check below. "effective" is a reserved rule id, so this can
+    // never shadow (or be shadowed by) a real `GET /policies/:id`.
+    if (first === "policies" && second === "effective") {
+      return handleEffectivePolicy(request, cors);
     }
 
     // Everything below is the console's API and needs the admin token.

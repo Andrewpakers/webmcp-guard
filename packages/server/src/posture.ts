@@ -1,4 +1,9 @@
-import type { LogAgentInfo, PostureSnapshot } from "@webmcp-guard/shared";
+import {
+  parseUserAgentBrands,
+  type BrowserBrand,
+  type LogAgentInfo,
+  type PostureSnapshot,
+} from "@webmcp-guard/shared";
 
 import { truncate } from "./http";
 
@@ -27,6 +32,27 @@ export function pickBrand(
   if (brands === undefined || brands.length === 0) return undefined;
   const real = brands.filter((entry) => !GREASE_BRAND.test(entry.brand));
   return real.find((entry) => entry.brand !== "Chromium") ?? real[0] ?? undefined;
+}
+
+/**
+ * Every brand a `browser` posture matcher may be tested against: the Client
+ * Hints list with the GREASE entry removed, or — when the client sent none —
+ * whatever the UA string implies.
+ *
+ * The server re-derives the UA fallback rather than trusting the SDK to have
+ * done it, because a posture snapshot is just JSON on the wire: it may come
+ * from an older SDK, a hand-rolled client, or a browser that hides Client
+ * Hints. Deriving it here means one rule (`brand: "Chromium", maxVersion: 148`)
+ * behaves the same for all of them.
+ *
+ * It stays a *fallback*, not a supplement: when a client reports Client Hints,
+ * those are the brands, and the server does not second-guess them with a
+ * regex.
+ */
+export function postureBrands(posture: PostureSnapshot): BrowserBrand[] {
+  const reported = (posture.brands ?? []).filter((entry) => !GREASE_BRAND.test(entry.brand));
+  if (reported.length > 0) return reported;
+  return parseUserAgentBrands(posture.userAgent);
 }
 
 export function agentInfoFromPosture(posture: PostureSnapshot | undefined): LogAgentInfo {

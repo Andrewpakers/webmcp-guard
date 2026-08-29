@@ -2,13 +2,18 @@ import { GateRequestSchema, TransformRequestSchema } from "@webmcp-guard/shared"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  APPROVAL_NOT_ACCEPTED_MESSAGE,
   BLOCKED_FALLBACK_MESSAGE,
   CANCELLED_MESSAGE,
+  CONFIRMATION_UNAVAILABLE_MESSAGE,
   EMPTY_RESULT_MESSAGE,
   type BlockedInfo,
+  type ConfirmationHandler,
+  type ConfirmationRequest,
   type GuardEvent,
   type GuardToolDefinition,
   createGuard,
+  declinedMessage,
   executeFailedMessage,
   verificationFailedMessage,
 } from "./index";
@@ -60,11 +65,12 @@ const transformResponse = (result: unknown) =>
   envelopeResponse({ result, classesFound: [], ruleIds: ["R-transform"] });
 
 async function setup(
-  routes: { gate?: FetchRoute; transform?: FetchRoute } = {},
+  routes: { gate?: FetchRoute; transform?: FetchRoute; policies?: FetchRoute } = {},
   init: {
     definition?: Partial<GuardToolDefinition>;
     getSessionContext?: () => { userId?: string; role?: string } | undefined;
     onBlockedThrows?: boolean;
+    confirmationHandler?: ConfirmationHandler;
   } = {},
 ): Promise<Harness> {
   const modelContext = new StubModelContext();
@@ -80,6 +86,7 @@ async function setup(
       order.push("transform");
       return (routes.transform ?? (() => transformResponse(RAW)))(call);
     },
+    ...(routes.policies ? { policies: routes.policies } : {}),
   });
 
   const events: GuardEvent[] = [];
@@ -93,6 +100,7 @@ async function setup(
       blocked.push(info);
       if (init.onBlockedThrows) throw new Error("toast exploded");
     },
+    ...(init.confirmationHandler ? { confirmationHandler: init.confirmationHandler } : {}),
   });
   guard.subscribe((event) => events.push(event));
 
@@ -311,24 +319,279 @@ describe("deny", () => {
     expect(harness.order).toEqual(["gate"]);
   });
 
-  it.each(["require-confirmation", "require-justification"] as const)(
-    "treats %s as a block until those flows ship (Phase 5)",
-    async (verdict) => {
-      const harness = await setup({
+  it("blocks a require-justification verdict with the guard's instructions", async () => {
+    const message = 'Justification required: call "export_patients" again with a justification.';
+    const harness = await setup({
+      gate: () =>
+        envelopeResponse({
+          callId: "call_x",
+          verdict: "require-justification",
+          ruleIds: ["R-1"],
+          message,
+        }),
+    });
+
+    await expect(harness.call({})).resolves.toBe(message);
+    expect(harness.order).toEqual(["gate"]);
+    expect(harness.blocked[0].verdict).toBe("require-justification");
+  });
+
+  it("fails closed on a confirmation verdict that carries no id to approve", async () => {
+    const harness = await setup({
+      gate: () =>
+        envelopeResponse({ callId: "call_x", verdict: "require-confirmation", ruleIds: ["R-1"] }),
+    });
+
+    // Nothing to approve means nothing runs — and the agent is told to ask a
+    // person rather than to retry.
+    await expect(harness.call({})).resolves.toBe(CONFIRMATION_UNAVAILABLE_MESSAGE);
+    expect(harness.order).toEqual(["gate"]);
+  });
+});
+
+/**
+ * The confirmation round trip (`docs/04` behavior 4, `docs/05` demo step 4).
+ *
+ * The shape under test: gate says `require-confirmation` and hands back a
+ * one-time id → the SDK asks a person → **only** on approval does it re-issue
+ * the identical gate call with that id → the second verdict is the real one.
+ *
+ * A stub handler stands in for the modal here; the modal itself is covered in
+ * `confirmation.test.ts`, and driven for real in the headless-Chromium e2e run.
+ */
+describe("human confirmation", () => {
+  const POLICY_MESSAGE =
+    "Human confirmation required by policy Destructive tools require human confirmation " +
+    "(destructive-requires-confirmation): approve this in the page.";
+
+  /** Answers `require-confirmation` first, then whatever the id earns. */
+  function confirmingGate(
+    second: (call: { payload: Record<string, unknown> }) => Response,
+  ): FetchRoute {
+    let asked = false;
+    return (call) => {
+      if (!asked) {
+        asked = true;
+        return envelopeResponse({
+          callId: "call_ask",
+          verdict: "require-confirmation",
+          confirmationId: "conf_1",
+          ruleIds: ["destructive-requires-confirmation"],
+          message: POLICY_MESSAGE,
+        });
+      }
+      return second(call);
+    };
+  }
+
+  const approvedGate = () =>
+    confirmingGate((call) =>
+      envelopeResponse({
+        callId: "call_run",
+        verdict: "allow",
+        args: (call.payload as { args: Record<string, unknown> }).args,
+        ruleIds: ["destructive-requires-confirmation"],
+        message: "The person using this page approved this call, so it ran.",
+      }),
+    );
+
+  function stubHandler(decision: "approved" | "declined" | "cancelled") {
+    const seen: ConfirmationRequest[] = [];
+    const handler: ConfirmationHandler = (request) => {
+      seen.push(request);
+      return decision;
+    };
+    return { handler, seen };
+  }
+
+  it("describes the call to the person, exactly as the guard bound it", async () => {
+    const { handler, seen } = stubHandler("declined");
+    const harness = await setup({ gate: approvedGate() }, { confirmationHandler: handler });
+
+    await harness.call({ patient: "LM-100060" });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({
+      app: "lakeside-portal",
+      tool: "search_patients",
+      callId: "call_ask",
+      confirmationId: "conf_1",
+      message: POLICY_MESSAGE,
+      args: { patient: "LM-100060" },
+    });
+  });
+
+  it("re-issues the same call with the id and runs it on approval", async () => {
+    const { handler } = stubHandler("approved");
+    const harness = await setup(
+      { gate: approvedGate(), transform: () => transformResponse("deleted") },
+      { confirmationHandler: handler },
+    );
+
+    await expect(harness.call({ patient: "LM-100060" })).resolves.toBe("deleted");
+
+    // Two gate calls: the ask, then the approved one carrying the id.
+    expect(harness.fetchStub.gateCalls).toHaveLength(2);
+    expect(harness.fetchStub.gateCalls[0].payload.confirmationId).toBeUndefined();
+    expect(harness.fetchStub.gateCalls[1].payload).toMatchObject({
+      tool: "search_patients",
+      args: { patient: "LM-100060" },
+      confirmationId: "conf_1",
+    });
+    expect(harness.order).toEqual(["gate", "gate", "execute", "transform"]);
+  });
+
+  it("returns the declined message and never runs the tool", async () => {
+    const { handler } = stubHandler("declined");
+    const harness = await setup({ gate: approvedGate() }, { confirmationHandler: handler });
+
+    const result = await harness.call({ patient: "LM-100060" });
+
+    expect(String(result)).toContain("the person at the keyboard declined");
+    // The policy's own explanation travels with it, so the model has the reason.
+    expect(String(result)).toContain(POLICY_MESSAGE);
+    expect(result).toBe(declinedMessage(POLICY_MESSAGE));
+    expect(harness.order).toEqual(["gate"]);
+    expect(harness.fetchStub.gateCalls).toHaveLength(1);
+    expect(harness.fetchStub.transformCalls).toHaveLength(0);
+  });
+
+  it("fires onBlocked and a blocked event on a decline", async () => {
+    const { handler } = stubHandler("declined");
+    const harness = await setup({ gate: approvedGate() }, { confirmationHandler: handler });
+
+    await harness.call({});
+
+    expect(harness.events.map((event) => event.type)).toEqual(["gate", "confirmation", "blocked"]);
+    expect(harness.events[1]).toMatchObject({
+      type: "confirmation",
+      decision: "declined",
+      callId: "call_ask",
+    });
+    expect(harness.blocked).toHaveLength(1);
+    expect(harness.blocked[0]).toMatchObject({
+      verdict: "require-confirmation",
+      callId: "call_ask",
+    });
+  });
+
+  it("emits an approved confirmation event for the activity drawer", async () => {
+    const { handler } = stubHandler("approved");
+    const harness = await setup({ gate: approvedGate() }, { confirmationHandler: handler });
+
+    await harness.call({});
+
+    expect(harness.events.map((event) => event.type)).toEqual([
+      "gate",
+      "confirmation",
+      "gate",
+      "executed",
+      "transformed",
+    ]);
+    expect(harness.events[1]).toMatchObject({ decision: "approved" });
+    expect(harness.events[1].detail).toContain("approved");
+  });
+
+  it("reports cancellation when the call is abandoned mid-modal", async () => {
+    const controller = new AbortController();
+    const handler: ConfirmationHandler = () => {
+      controller.abort();
+      return "cancelled";
+    };
+    const harness = await setup({ gate: approvedGate() }, { confirmationHandler: handler });
+
+    await expect(harness.callWithContext({}, controller.signal)).resolves.toBe(CANCELLED_MESSAGE);
+    expect(harness.order).toEqual(["gate"]);
+    expect(harness.events.at(-1)).toMatchObject({ type: "confirmation", decision: "cancelled" });
+  });
+
+  it("does not run the call when the signal aborted while the modal was open", async () => {
+    const controller = new AbortController();
+    // A handler that says "approved" after the call was already abandoned must
+    // not resurrect it.
+    const handler: ConfirmationHandler = () => {
+      controller.abort();
+      return "approved";
+    };
+    const harness = await setup({ gate: approvedGate() }, { confirmationHandler: handler });
+
+    await expect(harness.callWithContext({}, controller.signal)).resolves.toBe(CANCELLED_MESSAGE);
+    expect(harness.fetchStub.gateCalls).toHaveLength(1);
+    expect(harness.order).toEqual(["gate"]);
+  });
+
+  it("treats a handler that throws as a decline", async () => {
+    const handler: ConfirmationHandler = () => {
+      throw new Error("modal blew up");
+    };
+    const harness = await setup({ gate: approvedGate() }, { confirmationHandler: handler });
+
+    const result = await harness.call({});
+
+    expect(String(result)).toContain("declined");
+    expect(harness.order).toEqual(["gate"]);
+    expect(harness.events.some((event) => event.detail?.includes("modal blew up"))).toBe(true);
+  });
+
+  it("stops when the approved call is refused by the guard", async () => {
+    const { handler } = stubHandler("approved");
+    const denial = "Blocked by policy: that approval has already been used.";
+    const harness = await setup(
+      {
+        gate: confirmingGate(() =>
+          envelopeResponse({
+            callId: "call_denied",
+            verdict: "deny",
+            ruleIds: ["destructive-requires-confirmation"],
+            message: denial,
+          }),
+        ),
+      },
+      { confirmationHandler: handler },
+    );
+
+    await expect(harness.call({})).resolves.toBe(denial);
+    expect(harness.order).toEqual(["gate", "gate"]);
+    expect(harness.fetchStub.transformCalls).toHaveLength(0);
+  });
+
+  it("explains a silent refusal of an approval the person did give", async () => {
+    const { handler } = stubHandler("approved");
+    const harness = await setup(
+      {
+        gate: confirmingGate(() =>
+          envelopeResponse({ callId: "call_denied", verdict: "deny", ruleIds: [] }),
+        ),
+      },
+      { confirmationHandler: handler },
+    );
+
+    await expect(harness.call({})).resolves.toBe(APPROVAL_NOT_ACCEPTED_MESSAGE);
+  });
+
+  it("never loops, even if the guard asks for confirmation twice", async () => {
+    const { handler, seen } = stubHandler("approved");
+    const harness = await setup(
+      {
         gate: () =>
           envelopeResponse({
-            callId: "call_x",
-            verdict,
+            callId: "call_ask",
+            verdict: "require-confirmation",
+            confirmationId: "conf_1",
             ruleIds: ["R-1"],
-            message: "A human needs to approve this.",
+            message: POLICY_MESSAGE,
           }),
-      });
+      },
+      { confirmationHandler: handler },
+    );
 
-      await expect(harness.call({})).resolves.toBe("A human needs to approve this.");
-      expect(harness.order).toEqual(["gate"]);
-      expect(harness.blocked[0].verdict).toBe(verdict);
-    },
-  );
+    await harness.call({});
+
+    // One ask, one re-issue, then it stops: an agent cannot drive a modal storm.
+    expect(seen).toHaveLength(1);
+    expect(harness.fetchStub.gateCalls).toHaveLength(2);
+    expect(harness.order).toEqual(["gate", "gate"]);
+  });
 });
 
 describe("fail closed — gate", () => {
@@ -468,7 +731,7 @@ describe("invalid arguments", () => {
     const result = await harness.call(input);
 
     expect(String(result)).toContain("were not a JSON object");
-    expect(harness.fetchStub.calls).toHaveLength(0);
+    expect(harness.fetchStub.pipelineCalls).toHaveLength(0);
     expect(harness.order).toEqual([]);
   });
 });
@@ -480,7 +743,7 @@ describe("abort", () => {
     controller.abort();
 
     await expect(harness.callWithContext({}, controller.signal)).resolves.toBe(CANCELLED_MESSAGE);
-    expect(harness.fetchStub.calls).toHaveLength(0);
+    expect(harness.fetchStub.pipelineCalls).toHaveLength(0);
     expect(harness.events.at(-1)).toMatchObject({ type: "error" });
     expect(harness.events.at(-1)?.detail).toContain("cancelled");
   });
@@ -491,8 +754,8 @@ describe("abort", () => {
 
     await harness.callWithContext({ query: "smith" }, controller.signal);
 
-    expect(harness.fetchStub.calls).toHaveLength(2);
-    for (const call of harness.fetchStub.calls) {
+    expect(harness.fetchStub.pipelineCalls).toHaveLength(2);
+    for (const call of harness.fetchStub.pipelineCalls) {
       expect(call.init.signal).toBe(controller.signal);
     }
   });

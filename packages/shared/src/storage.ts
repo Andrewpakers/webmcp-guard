@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { DataClassSchema, type DataClass } from "./data-class";
-import { LogEntrySchema, type LogPayloads } from "./log";
+import { LogEntrySchema, type LogJustificationVerdict, type LogPayloads } from "./log";
 import type { PolicyDocument, Rule, RuleAction, RuleMatch } from "./policy";
 import type { GateVerdict } from "./wire";
 
@@ -92,6 +92,7 @@ export interface LogCompletion {
   payloads?: Partial<LogPayloads>;
   message?: string;
   justification?: string;
+  justificationVerdict?: LogJustificationVerdict;
 }
 
 /**
@@ -191,6 +192,34 @@ export const VaultEntrySchema = z
   .strict();
 
 export type VaultEntry = z.infer<typeof VaultEntrySchema>;
+
+/**
+ * A pending human confirmation: the one-time id `/gate` issues for a
+ * `require-confirmation` verdict (`docs/03-architecture.md`: "the server issues
+ * a one-time confirmation id so the approval can't be replayed").
+ *
+ * The row binds the approval to one call: the same app, the same tool, and —
+ * through `argsHash` — the exact arguments the human was shown. Nothing here is
+ * secret, so nothing here is encrypted: `argsHash` is a SHA-256 of the
+ * canonicalized call, which is a *binding*, not a way to recover the arguments.
+ */
+export const ConfirmationEntrySchema = z
+  .object({
+    /** Unguessable one-time id (a v4 UUID from the server's CSPRNG). */
+    id: z.string().min(1),
+    app: z.string().min(1),
+    tool: z.string().min(1),
+    /** Hex SHA-256 over the canonical JSON of `(app, tool, args)`. */
+    argsHash: z.string().min(1),
+    /** The audit entry of the gate call that asked for the confirmation. */
+    callId: z.string().min(1),
+    issuedAt: z.string().datetime(),
+    /** ISO-8601. Expiry is judged by the caller, not by `consumeConfirmation`. */
+    expiresAt: z.string().datetime(),
+  })
+  .strict();
+
+export type ConfirmationEntry = z.infer<typeof ConfirmationEntrySchema>;
 
 export type GuardStorageErrorCode = "duplicate-rule" | "unknown-rule" | "invalid-argument";
 
@@ -356,4 +385,31 @@ export interface GuardStorage {
   putVaultEntry(entry: VaultEntry): Promise<VaultEntry>;
 
   getVaultEntry(token: string): Promise<VaultEntry | null>;
+
+  // ---- pending human confirmations (Phase 5) ------------------------------
+
+  /**
+   * Stores a one-time confirmation. Ids come from the server's CSPRNG, so a
+   * collision is not a case worth designing for: implementations may simply
+   * overwrite.
+   *
+   * **Adapters must evict entries whose `expiresAt` has passed** when a new one
+   * is stored. Confirmations that are never consumed (the human declined, or
+   * walked away) would otherwise accumulate forever, and eviction on write is
+   * the cheapest place to do it without a background job.
+   */
+  putConfirmation(entry: ConfirmationEntry): Promise<ConfirmationEntry>;
+
+  /**
+   * Atomically removes the confirmation and returns it; `null` when there is no
+   * entry with that id — including when it was already consumed. **Single use
+   * is the whole point**: the second call for an id must return `null` even if
+   * two requests race.
+   *
+   * Deliberately does *not* check `expiresAt`. An expired id is still returned
+   * (and still destroyed) so that the caller can burn a replay attempt before
+   * judging it — see the `/gate` confirmation flow in
+   * `packages/server/src/server.ts`.
+   */
+  consumeConfirmation(id: string): Promise<ConfirmationEntry | null>;
 }

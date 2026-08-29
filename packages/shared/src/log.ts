@@ -40,6 +40,33 @@ export const LogPayloadsSchema = z
 
 export type LogPayloads = z.infer<typeof LogPayloadsSchema>;
 
+export const JUSTIFICATION_VERDICTS = ["pass", "fail"] as const;
+
+export const JustificationVerdictSchema = z.enum(JUSTIFICATION_VERDICTS);
+
+export type JustificationVerdict = z.infer<typeof JustificationVerdictSchema>;
+
+/**
+ * What the justification evaluator decided, recorded next to the text the agent
+ * supplied (`docs/04-sdk-requirements.md` → "Justification evaluator").
+ *
+ * The pair is stored as `justification` (the text) + `justificationVerdict`
+ * (this object) rather than as one nested `{text, verdict, reason}` value on
+ * purpose: that is the exact shape the console's audit drawer already reads
+ * defensively (`apps/console/lib/logs/entry.ts` → `readJustification`), and it
+ * keeps the existing `justification` TEXT column in the SQLite adapter
+ * meaningful for entries written before Phase 5.
+ */
+export const LogJustificationVerdictSchema = z
+  .object({
+    verdict: JustificationVerdictSchema,
+    /** One short sentence, safe to show an administrator. */
+    reason: z.string(),
+  })
+  .strict();
+
+export type LogJustificationVerdict = z.infer<typeof LogJustificationVerdictSchema>;
+
 export const LogEntrySchema = z
   .object({
     id: z.string().min(1),
@@ -58,6 +85,8 @@ export const LogEntrySchema = z
     payloads: LogPayloadsSchema,
     /** Supplied by the agent when policy required a justification. */
     justification: z.string().optional(),
+    /** How the evaluator judged that justification. */
+    justificationVerdict: LogJustificationVerdictSchema.optional(),
     /** The explanation returned to the agent, for non-allow verdicts. */
     message: z.string().optional(),
   })

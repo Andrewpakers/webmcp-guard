@@ -1,4 +1,4 @@
-import type { PostureSnapshot } from "@webmcp-guard/shared";
+import { parseUserAgentBrands, type PostureSnapshot } from "@webmcp-guard/shared";
 
 import { guardGlobals } from "./webmcp";
 
@@ -7,11 +7,9 @@ import { guardGlobals } from "./webmcp";
  *
  * Honesty rule from `docs/04` behavior 5 and `docs/03`'s threat model: every
  * field here is spoofable by anyone who can run script in the page. The client
- * *reports*, the server *decides*. Nothing in this file is a security control.
- *
- * Phase 2 collects the deterministic basics. The best-effort agent guess
- * (`agentId`) and UA-string brand parsing land with the posture rule pack in
- * Phase 5.
+ * *reports*, the server *decides*. Nothing in this file is a security control,
+ * and nothing in this repo may describe `agentId` as identification — it is a
+ * guess made from a string the caller controls.
  */
 
 function asString(value: unknown): string | undefined {
@@ -35,6 +33,50 @@ function readBrands(value: unknown): Array<{ brand: string; version: string }> |
     if (brand !== undefined && version !== undefined) brands.push({ brand, version });
   }
   return brands.length > 0 ? brands : undefined;
+}
+
+/**
+ * Substrings that suggest which agent is driving the page, checked **in order,
+ * most specific first** — ChatGPT's Atlas browser also says "ChatGPT", so the
+ * general marker has to come last or it would swallow the specific one.
+ *
+ * Extending this list is the intended way to teach WebMCP Guard about a new
+ * agent: add a `{ marker, id }` pair, and `{kind: "agent", id}` policy rules
+ * start matching it. Nothing else has to change.
+ *
+ * These are *conventions*, not credentials. Any page script can set
+ * `navigator.userAgent` in a test harness, and any agent can omit its marker.
+ * A rule written against an agent id is a routing decision ("treat this fleet
+ * differently"), never an authorization decision.
+ */
+export const AGENT_UA_MARKERS: readonly { marker: string; id: string }[] = [
+  { marker: "atlas", id: "chatgpt-atlas" },
+  { marker: "chatgpt", id: "chatgpt-inapp" },
+];
+
+/**
+ * Best-effort agent guess from the UA string and the Client-Hints brand names.
+ *
+ * Both are searched because a Chromium-based agent browser may announce itself
+ * as a *brand* ("ChatGPT";v="1") rather than in the UA string, and either one
+ * is as (un)trustworthy as the other.
+ *
+ * Returns `undefined` when nothing matches — which is a real answer the policy
+ * engine can act on (`{kind: "unknown"}`), not a failure.
+ */
+export function guessAgentId(
+  userAgent: string | undefined,
+  brands: readonly { brand: string }[] | undefined,
+): string | undefined {
+  const haystack = [userAgent ?? "", ...(brands ?? []).map((entry) => entry.brand)]
+    .join(" ")
+    .toLowerCase();
+  if (haystack.trim().length === 0) return undefined;
+
+  for (const { marker, id } of AGENT_UA_MARKERS) {
+    if (haystack.includes(marker)) return id;
+  }
+  return undefined;
 }
 
 /**
@@ -68,6 +110,24 @@ export function collectPostureSnapshot(): PostureSnapshot {
 
     if (typeof userAgentData.mobile === "boolean") snapshot.mobile = userAgentData.mobile;
   }
+
+  /**
+   * UA Client Hints are Chromium-only and secure-context-only, so Safari,
+   * Firefox and anything on plain http report no brands at all. Parsing the UA
+   * string fills the same three fields the server's `browser` posture matcher
+   * reads, using the shared parser both halves of the guard agree on — so a
+   * version rule means the same thing wherever the call came from.
+   *
+   * Only ever a *fallback*: real Client Hints win, and nothing is invented
+   * beyond the schema's existing fields (`docs/04` behavior 5).
+   */
+  if (snapshot.brands === undefined) {
+    const parsed = parseUserAgentBrands(snapshot.userAgent);
+    if (parsed.length > 0) snapshot.brands = parsed;
+  }
+
+  const agentId = guessAgentId(snapshot.userAgent, snapshot.brands);
+  if (agentId !== undefined) snapshot.agentId = agentId;
 
   const width = asDimension(globals.innerWidth);
   const height = asDimension(globals.innerHeight);

@@ -52,6 +52,37 @@ export function invalidArgumentsMessage(tool: string): string {
 /** A tool that ran fine and returned nothing still needs to say something. */
 export const EMPTY_RESULT_MESSAGE = "The tool ran successfully and returned no content.";
 
+/**
+ * The decline. This string is the demo's dramatic beat (`docs/05` step 4: "the
+ * human declines; the agent receives a clean policy explanation"), so it does
+ * three things at once: it says *who* decided, it repeats the policy's own
+ * explanation so the model has the reason, and it closes the loop — the model
+ * should report back, not retry.
+ */
+export function declinedMessage(policyMessage?: string): string {
+  const policy = policyMessage === undefined ? "" : ` ${policyMessage}`;
+  return (
+    `This call needed human approval and the person at the keyboard declined it, so nothing ` +
+    `was done.${policy} Do not try again unless they ask you to — tell them it was declined ` +
+    `and ask what they would like instead.`
+  );
+}
+
+/**
+ * The approval was given but the follow-up gate call still refused it (the id
+ * expired while the modal was open, the arguments changed, the policy moved).
+ * Fail closed and say what happened.
+ */
+export const APPROVAL_NOT_ACCEPTED_MESSAGE =
+  "The person at the keyboard approved this call, but the guard did not accept the approval " +
+  "(it may have expired, or the policy may have changed while it was open). Nothing was done. " +
+  "Ask them to try again.";
+
+/** No confirmation id arrived with a `require-confirmation` verdict — nothing to approve. */
+export const CONFIRMATION_UNAVAILABLE_MESSAGE =
+  "This call needs approval from the person using this page, but WebMCP Guard could not open " +
+  "the approval prompt, so nothing was done. Ask them to perform the action in the portal.";
+
 /** Printed once per page when there is no WebMCP to register against. */
 export const WEBMCP_UNAVAILABLE_WARNING =
   "[WebMCP Guard] WebMCP is not available in this browser, so no tools were registered. " +

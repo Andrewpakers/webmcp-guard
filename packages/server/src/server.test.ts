@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // only ever be used by tests.
 import { memoryStorage, type MemoryStorage } from "../../storage-memory/src/index";
 
+import { CONFIRMATION_TTL_MS, hashCallArgs } from "./confirmation";
 import { DEFAULT_POLICY_RULES } from "./seed";
 import { createGuardServer, type GuardServer, type GuardServerConfig } from "./server";
 
@@ -97,6 +98,21 @@ beforeEach(async () => {
   guard = createGuardServer(config(storage));
   await guard.ready();
 });
+
+/**
+ * Runs one `search_patients` call end to end so its result is tokenized and the
+ * vault has something in it — the only way to get a real token to feed back in.
+ */
+async function searchAndTransform(result: unknown): Promise<TransformResponse> {
+  const gate = await payloadOf<GateResponse>(
+    await send(guard, "POST", "gate", { payload: gatePayload() }),
+  );
+  return payloadOf<TransformResponse>(
+    await send(guard, "POST", "transform", {
+      payload: { app: APP, tool: "search_patients", callId: gate.callId, result },
+    }),
+  );
+}
 
 function gatePayload(overrides: Record<string, unknown> = {}) {
   return {
@@ -193,7 +209,18 @@ describe("POST /gate", () => {
     expect(entry?.message).toBeUndefined();
   });
 
-  it("denies delete_patient with the seeded message and logs a completed entry", async () => {
+  it("denies with the rule's own message and logs a completed entry", async () => {
+    await storage.createRule({
+      id: "no-deletes",
+      name: "Deleting patients from an agent is blocked",
+      priority: 1,
+      match: { tools: ["delete_patient"] },
+      action: {
+        type: "deny",
+        message: "Ask the person using this page to delete the record in the portal.",
+      },
+    });
+
     const response = await send(guard, "POST", "gate", {
       payload: gatePayload({
         tool: "delete_patient",
@@ -203,15 +230,14 @@ describe("POST /gate", () => {
     });
 
     const gate = await payloadOf<GateResponse>(response);
-    const rule = DEFAULT_POLICY_RULES[3];
-    if (rule.action.type !== "deny") throw new Error("expected a deny rule");
 
     expect(response.status).toBe(200);
     expect(gate.verdict).toBe("deny");
     expect(gate.args).toBeUndefined();
-    expect(gate.ruleIds).toEqual(["delete-patient-deny-temp"]);
+    expect(gate.ruleIds).toEqual(["no-deletes"]);
     expect(gate.message).toBe(
-      `Blocked by policy ${rule.name} (delete-patient-deny-temp): ${rule.action.message}`,
+      "Blocked by policy Deleting patients from an agent is blocked (no-deletes): " +
+        "Ask the person using this page to delete the record in the portal.",
     );
 
     const entry = await storage.getLog(gate.callId);
@@ -285,6 +311,9 @@ describe("POST /gate", () => {
   });
 
   it("matches role-scoped rules from the session context", async () => {
+    // This test is about the `roles` matcher, so the seeded justification rule
+    // (which also matches export_patients) is taken out of the way.
+    await storage.updateRule("export-requires-justification", { enabled: false });
     await storage.createRule({
       id: "billing-no-export",
       name: "Billing cannot export",
@@ -395,6 +424,568 @@ describe("POST /gate", () => {
     const response = await send(guard, "GET", "gate");
     expect(response.status).toBe(405);
     expect(response.headers.get("allow")).toBe("POST");
+  });
+});
+
+/**
+ * The confirmation flow — the demo's dramatic beat, and the part of Phase 5
+ * with the most ways to go wrong. What these tests hold the gate to:
+ *
+ *  1. asking produces a one-time id bound to *this* call;
+ *  2. presenting a valid id runs the call exactly as an allow would;
+ *  3. every id is spent on first presentation, valid or not, so nothing is
+ *     replayable — including a replay that tampers with the arguments.
+ */
+describe("POST /gate — human confirmation", () => {
+  const deletePayload = (overrides: Record<string, unknown> = {}) =>
+    gatePayload({
+      tool: "delete_patient",
+      args: { patient: "LM-100060" },
+      toolTags: ["write", "destructive"],
+      ...overrides,
+    });
+
+  async function ask(overrides: Record<string, unknown> = {}): Promise<GateResponse> {
+    return payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: deletePayload(overrides) }),
+    );
+  }
+
+  it("mints a one-time id, explains itself, and runs nothing", async () => {
+    const gate = await ask();
+
+    expect(gate.verdict).toBe("require-confirmation");
+    expect(gate.confirmationId).toMatch(UUID);
+    expect(gate.args).toBeUndefined();
+    expect(gate.ruleIds).toEqual(["destructive-requires-confirmation"]);
+    expect(gate.message).toContain("Human confirmation required by policy");
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry).toMatchObject({
+      status: "complete",
+      verdict: "require-confirmation",
+      payloads: { argsBefore: { patient: "LM-100060" } },
+    });
+  });
+
+  it("binds the id to the call, the tool and the arguments", async () => {
+    const gate = await ask();
+    const stored = await storage.consumeConfirmation(gate.confirmationId as string);
+
+    expect(stored).toMatchObject({
+      app: APP,
+      tool: "delete_patient",
+      callId: gate.callId,
+      argsHash: hashCallArgs(APP, "delete_patient", { patient: "LM-100060" }),
+    });
+    expect(Date.parse(stored?.expiresAt as string) - Date.parse(stored?.issuedAt as string)).toBe(
+      CONFIRMATION_TTL_MS,
+    );
+  });
+
+  it("issues a different id every time", async () => {
+    const first = await ask();
+    const second = await ask();
+    expect(first.confirmationId).not.toBe(second.confirmationId);
+  });
+
+  it("runs the call as an allow once the id comes back", async () => {
+    const asked = await ask();
+    const approved = await ask({ confirmationId: asked.confirmationId });
+
+    expect(approved.verdict).toBe("allow");
+    expect(approved.args).toEqual({ patient: "LM-100060" });
+    expect(approved.callId).not.toBe(asked.callId);
+    // The rule that demanded the approval still gets the credit in the log.
+    expect(approved.ruleIds).toEqual(["destructive-requires-confirmation"]);
+    expect(approved.message).toContain("approved this call");
+
+    const entry = await storage.getLog(approved.callId);
+    expect(entry).toMatchObject({ status: "pending", verdict: "allow" });
+    expect(entry?.message).toContain("Approved in the page by the person using this browser");
+    expect(entry?.message).toContain("destructive-requires-confirmation");
+  });
+
+  it("refuses a replay of an id that already ran", async () => {
+    const asked = await ask();
+    await ask({ confirmationId: asked.confirmationId });
+
+    const replayed = await ask({ confirmationId: asked.confirmationId });
+    expect(replayed.verdict).toBe("deny");
+    expect(replayed.args).toBeUndefined();
+    expect(replayed.message).toContain("single-use");
+
+    const entry = await storage.getLog(replayed.callId);
+    expect(entry).toMatchObject({ status: "complete", verdict: "deny" });
+    expect(entry?.message).toContain("unknown-or-used");
+  });
+
+  it("refuses an id that was never issued", async () => {
+    const bogus = await ask({ confirmationId: "6f1c7e3a-0000-4000-8000-000000000000" });
+    expect(bogus.verdict).toBe("deny");
+    expect(bogus.message).toContain("never issued");
+  });
+
+  it("refuses arguments that changed after the person approved them", async () => {
+    const asked = await ask();
+
+    const tampered = await ask({
+      confirmationId: asked.confirmationId,
+      args: { patient: "LM-100061" },
+    });
+
+    expect(tampered.verdict).toBe("deny");
+    expect(tampered.message).toContain("arguments changed");
+
+    // …and the tampered attempt burned the approval, so the original call
+    // cannot be re-run afterwards either. This is the anti-replay property:
+    // consume first, judge second.
+    const honest = await ask({ confirmationId: asked.confirmationId });
+    expect(honest.verdict).toBe("deny");
+    expect(honest.message).toContain("single-use");
+  });
+
+  it("refuses an approval presented for a different tool", async () => {
+    // Widen the confirmation rule to cover export too, and take the
+    // justification rule (priority 20) out of its way.
+    await storage.updateRule("destructive-requires-confirmation", {
+      priority: 15,
+      match: { tools: { tags: ["destructive", "bulk"] } },
+    });
+    await storage.updateRule("export-requires-justification", { enabled: false });
+    const asked = await ask();
+
+    const elsewhere = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", {
+        payload: gatePayload({
+          tool: "export_patients",
+          args: { patient: "LM-100060" },
+          toolTags: ["bulk"],
+          confirmationId: asked.confirmationId,
+        }),
+      }),
+    );
+
+    expect(elsewhere.verdict).toBe("deny");
+    expect(elsewhere.message).toContain("issued for a different call");
+  });
+
+  it("refuses an approval that expired while the modal was open", async () => {
+    const asked = await ask();
+    const id = asked.confirmationId as string;
+
+    // Rewrite the stored expiry into the past, which is what waiting would do.
+    const stored = await storage.consumeConfirmation(id);
+    await storage.putConfirmation({
+      ...(stored as NonNullable<typeof stored>),
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    });
+
+    const late = await ask({ confirmationId: id });
+    expect(late.verdict).toBe("deny");
+    expect(late.message).toContain("expired");
+  });
+
+  it("spends a stale id even when policy no longer asks for confirmation", async () => {
+    const asked = await ask();
+    await storage.updateRule("destructive-requires-confirmation", { enabled: false });
+
+    const allowed = await ask({ confirmationId: asked.confirmationId });
+    expect(allowed.verdict).toBe("allow");
+    expect((await storage.getLog(allowed.callId))?.message).toContain("spent, not honoured");
+
+    // Re-enabled, the id is gone: it was consumed on presentation.
+    await storage.updateRule("destructive-requires-confirmation", { enabled: true });
+    const reused = await ask({ confirmationId: asked.confirmationId });
+    expect(reused.verdict).toBe("deny");
+  });
+
+  it("detokenizes only after the approval is accepted", async () => {
+    const transform = await searchAndTransform({ patients: [{ mrn: "LM-100060" }] });
+    const token = (transform.result as { patients: { mrn: string }[] }).patients[0].mrn;
+
+    const asked = await ask({ args: { patient: token } });
+    // Nothing came out of the vault while the call was merely pending.
+    expect(asked.args).toBeUndefined();
+
+    const approved = await ask({ confirmationId: asked.confirmationId, args: { patient: token } });
+    expect(approved.verdict).toBe("allow");
+    expect(approved.args).toEqual({ patient: "LM-100060" });
+  });
+});
+
+/**
+ * The justification flow. The rule the portal ships with is
+ * `export_patients` → 40 characters, and the three outcomes are: nothing sent,
+ * something useless sent, something real sent.
+ */
+describe("POST /gate — justification", () => {
+  const GOOD_REASON =
+    "Dr. Reyes asked for the hypertension cohort for Monday's care-gap review meeting.";
+
+  const exportPayload = (overrides: Record<string, unknown> = {}) =>
+    gatePayload({
+      tool: "export_patients",
+      args: {},
+      toolTags: ["read", "phi", "bulk", "destructive-adjacent"],
+      ...overrides,
+    });
+
+  async function exportCall(overrides: Record<string, unknown> = {}): Promise<GateResponse> {
+    return payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: exportPayload(overrides) }),
+    );
+  }
+
+  it("tells the agent exactly what to send when nothing was supplied", async () => {
+    const gate = await exportCall();
+
+    expect(gate.verdict).toBe("require-justification");
+    expect(gate.args).toBeUndefined();
+    expect(gate.message).toContain('call "export_patients" again');
+    expect(gate.message).toContain("at least 40 characters");
+    expect(gate.message).toContain("for whom");
+    expect(gate.ruleIds).toEqual(["phi-transform-default", "export-requires-justification"]);
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry).toMatchObject({ status: "complete", verdict: "require-justification" });
+    expect(entry?.justification).toBeUndefined();
+  });
+
+  it("rejects filler and records the evaluator's reason", async () => {
+    const gate = await exportCall({ args: { justification: "because I need it" } });
+
+    expect(gate.verdict).toBe("require-justification");
+    expect(gate.message).toContain("The justification you sent was rejected");
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry?.justification).toBe("because I need it");
+    expect(entry?.justificationVerdict).toMatchObject({ verdict: "fail" });
+    expect(entry?.justificationVerdict?.reason).toContain("40");
+  });
+
+  it("passes a real justification, strips it, and keeps it in the log", async () => {
+    const gate = await exportCall({
+      args: { condition: "hypertension", justification: GOOD_REASON },
+    });
+
+    expect(gate.verdict).toBe("allow");
+    // The tool never sees the guard's own argument: the portal's schemas are
+    // additionalProperties:false, and it was never part of the tool contract.
+    expect(gate.args).toEqual({ condition: "hypertension" });
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry).toMatchObject({
+      status: "pending",
+      verdict: "allow",
+      justification: GOOD_REASON,
+      justificationVerdict: { verdict: "pass" },
+      payloads: {
+        // The audit trail keeps what the agent actually sent…
+        argsBefore: { condition: "hypertension", justification: GOOD_REASON },
+        // …next to what the tool was handed.
+        argsAfter: { condition: "hypertension" },
+      },
+    });
+    expect(entry?.message).toContain("Justification accepted");
+  });
+
+  it("never detokenizes the justification text", async () => {
+    const transform = await searchAndTransform({ patients: [{ mrn: "LM-100060" }] });
+    const token = (transform.result as { patients: { mrn: string }[] }).patients[0].mrn;
+
+    const gate = await exportCall({
+      args: { justification: `${GOOD_REASON} Patient ${token}.` },
+    });
+
+    expect(gate.verdict).toBe("allow");
+    expect(gate.args).toEqual({});
+    // The stored justification still carries the token, not the real MRN.
+    expect((await storage.getLog(gate.callId))?.justification).toContain(token);
+    expect((await storage.getLog(gate.callId))?.justification).not.toContain("LM-100060");
+  });
+
+  it("honours a rule's own minimum", async () => {
+    await storage.updateRule("export-requires-justification", {
+      action: { type: "require-justification", minChars: 200 },
+    });
+
+    const gate = await exportCall({ args: { justification: GOOD_REASON } });
+    expect(gate.verdict).toBe("require-justification");
+    expect(gate.message).toContain("at least 200 characters");
+  });
+
+  it("uses a host-supplied evaluator when one is configured", async () => {
+    const seen: string[] = [];
+    const custom = createGuardServer(
+      config(storage, {
+        evaluator: {
+          evaluate({ justification, tool, args, context }) {
+            seen.push(justification);
+            expect(tool).toBe("export_patients");
+            expect(context.minChars).toBe(40);
+            expect(context.ruleId).toBe("export-requires-justification");
+            // The evaluator sees the arguments *without* the guard's own field.
+            expect(args).toEqual({});
+            return Promise.resolve({ verdict: "fail", reason: "Ticket number missing." });
+          },
+        },
+      }),
+    );
+    await custom.ready();
+
+    const gate = await payloadOf<GateResponse>(
+      await send(custom, "POST", "gate", {
+        payload: exportPayload({ args: { justification: GOOD_REASON } }),
+      }),
+    );
+
+    expect(seen).toEqual([GOOD_REASON]);
+    expect(gate.verdict).toBe("require-justification");
+    expect(gate.message).toContain("Ticket number missing.");
+  });
+
+  it("falls back to the heuristic when the evaluator fails, and says so", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const broken = createGuardServer(
+      config(storage, {
+        evaluator: {
+          evaluate() {
+            throw new Error("LLM provider unreachable");
+          },
+        },
+      }),
+    );
+    await broken.ready();
+
+    const gate = await payloadOf<GateResponse>(
+      await send(broken, "POST", "gate", {
+        payload: exportPayload({ args: { justification: GOOD_REASON } }),
+      }),
+    );
+
+    // Evaluator downtime must never block the demo (docs/04).
+    expect(gate.verdict).toBe("allow");
+    const entry = await storage.getLog(gate.callId);
+    expect(entry?.message).toContain("fell back to the built-in heuristic");
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("falls back when the evaluator answers with nonsense", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const weird = createGuardServer(
+      config(storage, {
+        evaluator: {
+          evaluate: () =>
+            ({ verdict: "maybe" }) as unknown as { verdict: "pass" | "fail"; reason: string },
+        },
+      }),
+    );
+    await weird.ready();
+
+    const gate = await payloadOf<GateResponse>(
+      await send(weird, "POST", "gate", {
+        payload: exportPayload({ args: { justification: "nope" } }),
+      }),
+    );
+
+    // The heuristic decided — and it says four characters is not a reason.
+    expect(gate.verdict).toBe("require-justification");
+    warn.mockRestore();
+  });
+});
+
+/**
+ * Posture, through the real route. The engine's matrix is covered in
+ * `policy-engine.test.ts`; what matters here is that `/gate` actually passes the
+ * snapshot to it, and that the seeded pack stays inert until an administrator
+ * turns it on.
+ */
+describe("POST /gate — posture", () => {
+  const headless = {
+    isSecureContext: true,
+    timestamp: "2026-08-29T12:00:00.000Z",
+    userAgent:
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+      "HeadlessChrome/151.0.0.0 Safari/537.36",
+  };
+
+  it("does nothing while the pack ships disabled", async () => {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload({ posture: headless }) }),
+    );
+    expect(gate.verdict).toBe("allow");
+  });
+
+  it("denies an unidentified agent once the rule is enabled", async () => {
+    await storage.updateRule("posture-deny-unknown-agent", { enabled: true });
+
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload({ posture: headless }) }),
+    );
+
+    expect(gate.verdict).toBe("deny");
+    // The transform rule matched too (the call is phi-tagged); the posture rule
+    // is the one that decided the verdict.
+    expect(gate.ruleIds).toContain("posture-deny-unknown-agent");
+    expect(gate.message).toContain("agents it can identify");
+  });
+
+  it("lets an identified agent through the same rule", async () => {
+    await storage.updateRule("posture-deny-unknown-agent", { enabled: true });
+
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", {
+        payload: gatePayload({ posture: { ...headless, agentId: "chatgpt-atlas" } }),
+      }),
+    );
+    expect(gate.verdict).toBe("allow");
+  });
+
+  it("denies a pre-WebMCP browser through the UA fallback", async () => {
+    await storage.updateRule("posture-deny-old-browser", { enabled: true });
+
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", {
+        payload: gatePayload({
+          posture: {
+            ...headless,
+            agentId: "chatgpt-atlas",
+            userAgent:
+              "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+              "Chrome/120.0.0.0 Safari/537.36",
+          },
+        }),
+      }),
+    );
+
+    expect(gate.verdict).toBe("deny");
+    expect(gate.ruleIds).toContain("posture-deny-old-browser");
+    expect(gate.message).toContain("older than Chrome 149");
+  });
+
+  it("does not fire a posture rule for a call that sent no posture at all", async () => {
+    await storage.updateRule("posture-deny-unknown-agent", { enabled: true });
+
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload() }),
+    );
+    // Permissive by design — see `agentMatches` in policy-engine.ts.
+    expect(gate.verdict).toBe("allow");
+  });
+});
+
+/**
+ * `GET /policies/effective` — the one policy read the page itself may make.
+ * Two properties matter: it works without the admin token, and it says as
+ * little as possible.
+ */
+describe("GET /policies/effective", () => {
+  async function effective(query: Record<string, string>, token?: string) {
+    const response = await send(guard, "GET", "policies/effective", {
+      query,
+      ...(token !== undefined ? { token } : {}),
+    });
+    return { response, payload: await payloadOf<Record<string, unknown>>(response.clone()) };
+  }
+
+  it("answers without the admin token, like /gate", async () => {
+    const { response, payload } = await effective({ app: APP, tool: "search_patients" });
+
+    expect(response.status).toBe(200);
+    expect(payload).toEqual({
+      requiresJustification: false,
+      minChars: null,
+      requiresConfirmation: false,
+      disabled: false,
+    });
+  });
+
+  it("reports the justification requirement and its minimum", async () => {
+    const { payload } = await effective({ app: APP, tool: "export_patients" });
+    expect(payload).toEqual({
+      requiresJustification: true,
+      minChars: 40,
+      requiresConfirmation: false,
+      disabled: false,
+    });
+  });
+
+  it("resolves tag-scoped rules from the comma list", async () => {
+    const withTags = await effective({
+      app: APP,
+      tool: "delete_patient",
+      tags: "write,destructive",
+    });
+    expect(withTags.payload).toMatchObject({
+      requiresConfirmation: true,
+      requiresJustification: false,
+    });
+
+    // Without the tags the tag-scoped rule cannot match — same as at the gate.
+    const withoutTags = await effective({ app: APP, tool: "delete_patient" });
+    expect(withoutTags.payload).toMatchObject({ requiresConfirmation: false });
+  });
+
+  it("leaks no rule internals", async () => {
+    const { payload } = await effective({ app: APP, tool: "export_patients" });
+    expect(Object.keys(payload).sort()).toEqual([
+      "disabled",
+      "minChars",
+      "requiresConfirmation",
+      "requiresJustification",
+    ]);
+    expect(JSON.stringify(payload)).not.toContain("export-requires-justification");
+  });
+
+  it("follows a live policy edit", async () => {
+    await storage.updateRule("export-requires-justification", { enabled: false });
+    expect((await effective({ app: APP, tool: "export_patients" })).payload).toMatchObject({
+      requiresJustification: false,
+      minChars: null,
+    });
+
+    await storage.updateRule("export-requires-justification", {
+      enabled: true,
+      action: { type: "require-justification", minChars: 120 },
+    });
+    expect((await effective({ app: APP, tool: "export_patients" })).payload).toMatchObject({
+      requiresJustification: true,
+      minChars: 120,
+    });
+  });
+
+  it("defaults minChars when the rule does not name one", async () => {
+    await storage.updateRule("export-requires-justification", {
+      action: { type: "require-justification" },
+    });
+    expect((await effective({ app: APP, tool: "export_patients" })).payload).toMatchObject({
+      minChars: 40,
+    });
+  });
+
+  it("requires app and tool", async () => {
+    expect((await send(guard, "GET", "policies/effective", { query: { app: APP } })).status).toBe(
+      400,
+    );
+    expect((await send(guard, "GET", "policies/effective", { query: { tool: "x" } })).status).toBe(
+      400,
+    );
+  });
+
+  it("rejects other methods", async () => {
+    const response = await send(guard, "DELETE", "policies/effective", { token: ADMIN_TOKEN });
+    expect(response.status).toBe(405);
+  });
+
+  it("cannot be shadowed by a rule called 'effective'", async () => {
+    const response = await send(guard, "POST", "policies", {
+      token: ADMIN_TOKEN,
+      payload: { id: "effective", name: "Sneaky", match: {}, action: { type: "allow" } },
+    });
+    expect(response.status).toBe(400);
+    expect((await errorOf(response)).message).toContain("reserved");
   });
 });
 
@@ -542,17 +1133,6 @@ describe("POST /transform", () => {
  * the site's own code ever runs (`docs/03` steps 4–8).
  */
 describe("the data pipeline through /gate and /transform", () => {
-  async function searchAndTransform(result: unknown): Promise<TransformResponse> {
-    const gate = await payloadOf<GateResponse>(
-      await send(guard, "POST", "gate", { payload: gatePayload() }),
-    );
-    return payloadOf<TransformResponse>(
-      await send(guard, "POST", "transform", {
-        payload: { app: APP, tool: "search_patients", callId: gate.callId, result },
-      }),
-    );
-  }
-
   it("round-trips a token from a result back into the next call's args", async () => {
     const transform = await searchAndTransform({
       patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }],
@@ -627,9 +1207,10 @@ describe("the data pipeline through /gate and /transform", () => {
       }),
     );
 
-    expect(gate.verdict).toBe("deny");
+    expect(gate.verdict).toBe("require-confirmation");
     expect(gate.args).toBeUndefined();
-    // A blocked call must not be usable as a detokenization oracle.
+    // A call that has not been allowed must not be usable as a
+    // detokenization oracle, whichever verdict stopped it.
     expect(vaultReads).not.toHaveBeenCalled();
 
     const entry = await storage.getLog(gate.callId);
@@ -1052,11 +1633,12 @@ describe("/policies", () => {
   });
 
   it("deletes a rule once", async () => {
-    const first = await send(guard, "DELETE", "policies/delete-patient-deny-temp", { token });
+    const id = "destructive-requires-confirmation";
+    const first = await send(guard, "DELETE", `policies/${id}`, { token });
     expect(first.status).toBe(200);
-    expect(await payloadOf(first)).toEqual({ id: "delete-patient-deny-temp", deleted: true });
+    expect(await payloadOf(first)).toEqual({ id, deleted: true });
 
-    const second = await send(guard, "DELETE", "policies/delete-patient-deny-temp", { token });
+    const second = await send(guard, "DELETE", `policies/${id}`, { token });
     expect(second.status).toBe(404);
   });
 
@@ -1064,12 +1646,12 @@ describe("/policies", () => {
     const document = await payloadOf<PolicyDocument>(
       await send(guard, "POST", "policies/reorder", {
         token,
-        payload: { ids: ["delete-patient-deny-temp", "phi-transform-default"] },
+        payload: { ids: ["destructive-requires-confirmation", "phi-transform-default"] },
       }),
     );
 
     expect(document.rules.map((rule) => rule.id).slice(0, 2)).toEqual([
-      "delete-patient-deny-temp",
+      "destructive-requires-confirmation",
       "phi-transform-default",
     ]);
   });
@@ -1094,7 +1676,7 @@ describe("/policies", () => {
   });
 
   it("takes effect on the next gate call, with no restart", async () => {
-    await send(guard, "PUT", "policies/delete-patient-deny-temp", {
+    await send(guard, "PUT", "policies/destructive-requires-confirmation", {
       token,
       payload: { enabled: false },
     });
@@ -1149,10 +1731,10 @@ describe("/logs", () => {
     );
     expect(byTool.total).toBe(1);
 
-    const denied = await payloadOf<LogPage>(
-      await send(guard, "GET", "logs", { token, query: { verdict: "deny" } }),
+    const held = await payloadOf<LogPage>(
+      await send(guard, "GET", "logs", { token, query: { verdict: "require-confirmation" } }),
     );
-    expect(denied.entries.map((entry) => entry.tool)).toEqual(["delete_patient"]);
+    expect(held.entries.map((entry) => entry.tool)).toEqual(["delete_patient"]);
   });
 
   it("paginates with limit and cursor", async () => {
@@ -1206,6 +1788,14 @@ describe("/logs", () => {
 
 describe("/stats", () => {
   it("counts calls, denials and tools", async () => {
+    await storage.createRule({
+      id: "stats-deny",
+      name: "Deny deletes",
+      priority: 1,
+      match: { tools: ["delete_patient"] },
+      action: { type: "deny", message: "Not from an agent." },
+    });
+
     await send(guard, "POST", "gate", { payload: gatePayload() });
     await send(guard, "POST", "gate", { payload: gatePayload() });
     await send(guard, "POST", "gate", {

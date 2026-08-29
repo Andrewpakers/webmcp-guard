@@ -55,7 +55,7 @@ describe("POST /api/guard/gate", () => {
     expect(payload.args).toEqual({ text: "hypertension" });
   });
 
-  it("denies delete_patient with the seeded TEMP rule and explains why", async () => {
+  it("holds delete_patient for human confirmation and issues a one-time id", async () => {
     const response = await POST(
       ...guardRequest(["gate"], {
         app: "lakeside-portal",
@@ -67,12 +67,28 @@ describe("POST /api/guard/gate", () => {
 
     expect(response.status).toBe(200);
     const payload = await payloadOf(response);
-    expect(payload.verdict).toBe("deny");
-    expect(payload.ruleIds).toContain("delete-patient-deny-temp");
+    expect(payload.verdict).toBe("require-confirmation");
+    expect(payload.ruleIds).toContain("destructive-requires-confirmation");
     // The message is what the agent reads: prose, and a route to the human.
-    expect(String(payload.message)).toContain("blocked by organization policy");
-    // A denied call never gets args to execute with.
+    expect(String(payload.message)).toContain("approved by the person using this page");
+    expect(typeof payload.confirmationId).toBe("string");
+    // Nothing runs until a person approves, so there are no args to run with.
     expect(payload.args).toBeUndefined();
+  });
+
+  it("asks for a justification before exporting, through the mounted route", async () => {
+    const response = await POST(
+      ...guardRequest(["gate"], {
+        app: "lakeside-portal",
+        tool: "export_patients",
+        args: {},
+        toolTags: ["read", "phi", "bulk", "destructive-adjacent"],
+      }),
+    );
+
+    const payload = await payloadOf(response);
+    expect(payload.verdict).toBe("require-justification");
+    expect(String(payload.message)).toContain("at least 40 characters");
   });
 
   it("rejects a malformed envelope", async () => {
@@ -100,7 +116,7 @@ describe("GET /api/guard/logs", () => {
     expect(response.status).toBe(401);
   });
 
-  it("shows the denied call to an admin", async () => {
+  it("shows the held call to an admin", async () => {
     // Make sure there is something to find, whatever order the tests ran in.
     await POST(
       ...guardRequest(["gate"], {
@@ -120,7 +136,7 @@ describe("GET /api/guard/logs", () => {
     expect(payload.entries.length).toBeGreaterThan(0);
     for (const entry of payload.entries) {
       expect(entry.tool).toBe("delete_patient");
-      expect(entry.verdict).toBe("deny");
+      expect(entry.verdict).toBe("require-confirmation");
       expect(entry.app).toBe("lakeside-portal");
     }
   });

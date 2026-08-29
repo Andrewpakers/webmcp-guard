@@ -2,8 +2,10 @@ import {
   PerClassTransformSchema,
   PolicyDocumentSchema,
   RuleSchema,
+  type AgentMatcher,
   type PolicyDefaultAction,
   type PolicyDocument,
+  type PostureSnapshot,
   type Rule,
   type RuleAction,
   type RuleMatch,
@@ -13,6 +15,8 @@ import { describe, expect, it } from "vitest";
 import {
   GATE_ACTION_TYPES,
   UNEVALUATABLE_MATCHERS,
+  agentMatcherMatches,
+  agentMatches,
   isEvaluableMatch,
   orderRules,
   resolvePolicy,
@@ -99,21 +103,13 @@ describe("ruleMatches", () => {
     );
   });
 
-  describe("matchers this phase cannot evaluate", () => {
-    it("lists agents and dataClasses", () => {
-      expect(UNEVALUATABLE_MATCHERS).toEqual(["agents", "dataClasses"]);
+  describe("matchers the engine cannot evaluate", () => {
+    it("is down to dataClasses now that posture is real", () => {
+      expect(UNEVALUATABLE_MATCHERS).toEqual(["dataClasses"]);
       expect(isEvaluableMatch({})).toBe(true);
       expect(isEvaluableMatch({ apps: [APP] })).toBe(true);
-      expect(isEvaluableMatch({ agents: [{ kind: "unknown" }] })).toBe(false);
+      expect(isEvaluableMatch({ agents: [{ kind: "unknown" }] })).toBe(true);
       expect(isEvaluableMatch({ dataClasses: ["ssn"] })).toBe(false);
-    });
-
-    it("never matches a posture rule, even when everything else lines up", () => {
-      const posture = rule({
-        match: { apps: [APP], tools: ["search_patients"], agents: [{ kind: "unknown" }] },
-        action: { type: "deny", message: "Unknown agent" },
-      });
-      expect(ruleMatches(posture, call)).toBe(false);
     });
 
     it("never matches a data-class rule yet", () => {
@@ -127,10 +123,10 @@ describe("ruleMatches", () => {
     it("lets the next rule decide instead", () => {
       const document = policy([
         rule({
-          id: "posture",
+          id: "by-class",
           priority: 10,
-          match: { agents: [{ kind: "unknown" }] },
-          action: { type: "deny", message: "Unknown agent" },
+          match: { dataClasses: ["ssn"] },
+          action: { type: "deny", message: "SSN present" },
         }),
         rule({ id: "fallback", priority: 20, action: { type: "allow" } }),
       ]);
@@ -138,6 +134,201 @@ describe("ruleMatches", () => {
       const decision = resolvePolicy(document, call);
       expect(decision.verdict).toBe("allow");
       expect(decision.ruleIds).toEqual(["fallback"]);
+    });
+  });
+});
+
+/**
+ * Posture matching (`docs/05` §4). The matrix below is the whole contract: what
+ * each matcher kind means, how versions compare, and — the part that matters
+ * most for judge safety — what happens when a call carries no posture at all.
+ */
+describe("posture matchers", () => {
+  const snapshot = (overrides: Partial<PostureSnapshot> = {}): PostureSnapshot => ({
+    isSecureContext: true,
+    timestamp: "2026-08-29T12:00:00.000Z",
+    ...overrides,
+  });
+
+  const chromium151 = snapshot({
+    brands: [
+      { brand: "Not.A/Brand", version: "24" },
+      { brand: "Chromium", version: "151" },
+      { brand: "Google Chrome", version: "151.0.7049.42" },
+    ],
+  });
+
+  describe("{kind: unknown}", () => {
+    const unknown: AgentMatcher = { kind: "unknown" };
+
+    it("matches a snapshot with no agent id", () => {
+      expect(agentMatcherMatches(unknown, chromium151)).toBe(true);
+      expect(agentMatcherMatches(unknown, snapshot({ agentId: "   " }))).toBe(true);
+    });
+
+    it("does not match a snapshot that named an agent", () => {
+      expect(agentMatcherMatches(unknown, snapshot({ agentId: "chatgpt-atlas" }))).toBe(false);
+    });
+  });
+
+  describe("{kind: agent}", () => {
+    const atlas: AgentMatcher = { kind: "agent", id: "chatgpt-atlas" };
+
+    it("matches the id exactly", () => {
+      expect(agentMatcherMatches(atlas, snapshot({ agentId: "chatgpt-atlas" }))).toBe(true);
+      expect(agentMatcherMatches(atlas, snapshot({ agentId: "chatgpt-inapp" }))).toBe(false);
+      expect(agentMatcherMatches(atlas, snapshot({ agentId: "CHATGPT-ATLAS" }))).toBe(false);
+      expect(agentMatcherMatches(atlas, chromium151)).toBe(false);
+    });
+  });
+
+  describe("{kind: browser}", () => {
+    it("matches a Client-Hints brand, case-insensitively", () => {
+      expect(agentMatcherMatches({ kind: "browser", brand: "Chromium" }, chromium151)).toBe(true);
+      expect(agentMatcherMatches({ kind: "browser", brand: "chromium" }, chromium151)).toBe(true);
+      expect(agentMatcherMatches({ kind: "browser", brand: "Firefox" }, chromium151)).toBe(false);
+    });
+
+    it("never matches the GREASE brand Client Hints pads the list with", () => {
+      expect(agentMatcherMatches({ kind: "browser", brand: "Not.A/Brand" }, chromium151)).toBe(
+        false,
+      );
+    });
+
+    it("does not treat one brand as a prefix of another", () => {
+      // "Chrome" is not "Chromium" and not "Google Chrome": a rule matches what
+      // it names, so a policy author cannot widen a rule by accident.
+      expect(agentMatcherMatches({ kind: "browser", brand: "Chrome" }, chromium151)).toBe(false);
+    });
+
+    it("compares the integer major version, inclusive at both bounds", () => {
+      const brand = "Chromium";
+      expect(agentMatcherMatches({ kind: "browser", brand, minVersion: 149 }, chromium151)).toBe(
+        true,
+      );
+      expect(agentMatcherMatches({ kind: "browser", brand, minVersion: 151 }, chromium151)).toBe(
+        true,
+      );
+      expect(agentMatcherMatches({ kind: "browser", brand, minVersion: 152 }, chromium151)).toBe(
+        false,
+      );
+      expect(agentMatcherMatches({ kind: "browser", brand, maxVersion: 148 }, chromium151)).toBe(
+        false,
+      );
+      expect(agentMatcherMatches({ kind: "browser", brand, maxVersion: 151 }, chromium151)).toBe(
+        true,
+      );
+      expect(
+        agentMatcherMatches(
+          { kind: "browser", brand, minVersion: 140, maxVersion: 150 },
+          chromium151,
+        ),
+      ).toBe(false);
+    });
+
+    it("reads the major version out of a full version string", () => {
+      expect(
+        agentMatcherMatches(
+          { kind: "browser", brand: "Google Chrome", maxVersion: 151 },
+          chromium151,
+        ),
+      ).toBe(true);
+    });
+
+    it("refuses a version range it cannot parse rather than guessing", () => {
+      const odd = snapshot({ brands: [{ brand: "Chromium", version: "stable" }] });
+      expect(agentMatcherMatches({ kind: "browser", brand: "Chromium", minVersion: 1 }, odd)).toBe(
+        false,
+      );
+      // With no range there is nothing to parse, so the brand alone decides.
+      expect(agentMatcherMatches({ kind: "browser", brand: "Chromium" }, odd)).toBe(true);
+    });
+
+    it("falls back to the UA string when Client Hints are absent", () => {
+      const safari = snapshot({
+        userAgent:
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 " +
+          "(KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+      });
+      expect(agentMatcherMatches({ kind: "browser", brand: "Safari" }, safari)).toBe(true);
+      expect(
+        agentMatcherMatches({ kind: "browser", brand: "Safari", maxVersion: 17 }, safari),
+      ).toBe(false);
+
+      const oldChrome = snapshot({
+        userAgent:
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+          "Chrome/120.0.0.0 Safari/537.36",
+      });
+      expect(
+        agentMatcherMatches({ kind: "browser", brand: "Chromium", maxVersion: 148 }, oldChrome),
+      ).toBe(true);
+    });
+
+    it("prefers Client Hints over the UA string when both are present", () => {
+      const lying = snapshot({
+        brands: [{ brand: "Chromium", version: "151" }],
+        userAgent:
+          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
+          "Chrome/120.0.0.0 Safari/537.36",
+      });
+      expect(
+        agentMatcherMatches({ kind: "browser", brand: "Chromium", maxVersion: 148 }, lying),
+      ).toBe(false);
+    });
+  });
+
+  describe("the agents matcher as a whole", () => {
+    it("ORs its alternatives", () => {
+      const matchers: AgentMatcher[] = [
+        { kind: "agent", id: "chatgpt-atlas" },
+        { kind: "browser", brand: "Chromium", maxVersion: 148 },
+      ];
+      expect(agentMatches(matchers, { ...call, posture: chromium151 })).toBe(false);
+      expect(
+        agentMatches(matchers, { ...call, posture: snapshot({ agentId: "chatgpt-atlas" }) }),
+      ).toBe(true);
+    });
+
+    /**
+     * The permissive choice, and a deliberate one: silence is not the same as
+     * "no agent". Documented in `agentMatches` — the posture pack ships
+     * disabled for judge safety, so its honest failure mode has to be "does not
+     * fire", never "fires for everyone".
+     */
+    it("does not fire at all when the call carried no posture", () => {
+      const posture = rule({
+        match: { agents: [{ kind: "unknown" }] },
+        action: { type: "deny", message: "Unknown agent" },
+      });
+
+      expect(ruleMatches(posture, call)).toBe(false);
+      expect(agentMatches([{ kind: "unknown" }], call)).toBe(false);
+      expect(resolvePolicy(policy([posture]), call).verdict).toBe("allow");
+    });
+
+    it("denies through the engine once posture arrives", () => {
+      const posture = rule({
+        id: "posture-deny-unknown-agent",
+        match: { agents: [{ kind: "unknown" }] },
+        action: { type: "deny", message: "Unknown agent" },
+      });
+
+      const decision = resolvePolicy(policy([posture]), { ...call, posture: chromium151 });
+      expect(decision.verdict).toBe("deny");
+      expect(decision.ruleIds).toEqual(["posture-deny-unknown-agent"]);
+    });
+
+    it("ANDs posture with the other matchers", () => {
+      const posture = rule({
+        match: { tools: ["delete_patient"], agents: [{ kind: "unknown" }] },
+        action: { type: "deny", message: "Unknown agent" },
+      });
+
+      expect(ruleMatches(posture, { ...call, posture: chromium151 })).toBe(false);
+      expect(ruleMatches(posture, { ...call, tool: "delete_patient", posture: chromium151 })).toBe(
+        true,
+      );
     });
   });
 });

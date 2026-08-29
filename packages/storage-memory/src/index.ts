@@ -5,6 +5,7 @@ import {
   encodeLogCursor,
   normalizeLogLimit,
   slugifyRuleId,
+  type ConfirmationEntry,
   type DayCount,
   type GuardStats,
   type GuardStorage,
@@ -72,6 +73,7 @@ export function memoryStorage(): MemoryStorage {
   const rules = new Map<string, RuleSlot>();
   const logs = new Map<string, LogSlot>();
   const vault = new Map<string, VaultEntry>();
+  const confirmations = new Map<string, ConfirmationEntry>();
   let defaultAction: PolicyDefaultAction = "allow";
   let ruleSeq = 0;
   let logSeq = 0;
@@ -136,6 +138,7 @@ export function memoryStorage(): MemoryStorage {
       rules.clear();
       logs.clear();
       vault.clear();
+      confirmations.clear();
       defaultAction = "allow";
       ruleSeq = 0;
       logSeq = 0;
@@ -260,6 +263,9 @@ export function memoryStorage(): MemoryStorage {
         ...(completion.justification !== undefined
           ? { justification: completion.justification }
           : {}),
+        ...(completion.justificationVerdict !== undefined
+          ? { justificationVerdict: completion.justificationVerdict }
+          : {}),
         payloads: { ...slot.record.payloads, ...(completion.payloads ?? {}) },
       });
 
@@ -359,6 +365,31 @@ export function memoryStorage(): MemoryStorage {
     async getVaultEntry(token: string): Promise<VaultEntry | null> {
       const entry = vault.get(token);
       return entry ? cloneJson(entry) : null;
+    },
+
+    async putConfirmation(entry: ConfirmationEntry): Promise<ConfirmationEntry> {
+      // Contract: storing a confirmation evicts the ones that have expired.
+      // Declined approvals are never consumed, so without this the map only
+      // ever grows.
+      const now = Date.now();
+      for (const [id, pending] of confirmations) {
+        // `!(… >= now)` also evicts an unparsable expiry, which is the safe
+        // direction: a confirmation nobody can date is not one to keep.
+        if (!(Date.parse(pending.expiresAt) >= now)) confirmations.delete(id);
+      }
+
+      confirmations.set(entry.id, cloneJson(entry));
+      return cloneJson(entry);
+    },
+
+    async consumeConfirmation(id: string): Promise<ConfirmationEntry | null> {
+      const entry = confirmations.get(id);
+      if (!entry) return null;
+      // Single-use. JavaScript's run-to-completion semantics make the
+      // get/delete pair atomic here: no `await` separates them, so two racing
+      // consumers cannot both see the entry.
+      confirmations.delete(id);
+      return cloneJson(entry);
     },
   };
 }

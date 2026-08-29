@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 import {
+  ConfirmationEntrySchema,
   GuardStorageError,
   LogRecordSchema,
   POLICY_VERSION,
@@ -11,6 +12,7 @@ import {
   encodeLogCursor,
   normalizeLogLimit,
   slugifyRuleId,
+  type ConfirmationEntry,
   type DayCount,
   type GuardStats,
   type GuardStorage,
@@ -91,7 +93,31 @@ CREATE TABLE IF NOT EXISTS guard_vault (
   auth_tag      TEXT NOT NULL,
   first_seen_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS guard_confirmations (
+  id         TEXT PRIMARY KEY,
+  app        TEXT NOT NULL,
+  tool       TEXT NOT NULL,
+  args_hash  TEXT NOT NULL,
+  call_id    TEXT NOT NULL,
+  issued_at  TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_guard_confirmations_expiry ON guard_confirmations (expires_at);
 `;
+
+/**
+ * Columns added after `guard_logs` first shipped. `CREATE TABLE IF NOT EXISTS`
+ * cannot widen a table that already exists — and the demo portal keeps its
+ * database file across restarts — so new columns need a real (idempotent)
+ * migration step.
+ */
+const ADDED_LOG_COLUMNS: readonly { name: string; ddl: string }[] = [
+  // Phase 5: the justification evaluator's verdict, stored as JSON next to the
+  // justification text that was already here.
+  { name: "justification_verdict_json", ddl: "TEXT" },
+];
 
 const DEFAULT_ACTION_KEY = "default_action";
 const PRIORITY_STEP = 10;
@@ -122,7 +148,18 @@ interface LogRow {
   duration_ms: number;
   payloads_json: string;
   justification: string | null;
+  justification_verdict_json: string | null;
   message: string | null;
+}
+
+interface ConfirmationRow {
+  id: string;
+  app: string;
+  tool: string;
+  args_hash: string;
+  call_id: string;
+  issued_at: string;
+  expires_at: string;
 }
 
 interface VaultRow {
@@ -205,7 +242,23 @@ function rowToLog(row: LogRow): LogRecord {
     durationMs: row.duration_ms,
     payloads: parseJson(row.payloads_json),
     justification: nullToUndefined(row.justification),
+    justificationVerdict:
+      row.justification_verdict_json === null
+        ? undefined
+        : parseJson(row.justification_verdict_json),
     message: nullToUndefined(row.message),
+  });
+}
+
+function rowToConfirmation(row: ConfirmationRow): ConfirmationEntry {
+  return ConfirmationEntrySchema.parse({
+    id: row.id,
+    app: row.app,
+    tool: row.tool,
+    argsHash: row.args_hash,
+    callId: row.call_id,
+    issuedAt: row.issued_at,
+    expiresAt: row.expires_at,
   });
 }
 
@@ -268,8 +321,23 @@ export function sqliteStorage(options: SqliteStorageOptions = {}): GuardStorage 
   const { db, owned } = openDatabase(options);
   let closed = false;
 
+  /**
+   * Creates anything missing and widens `guard_logs` if it predates a column.
+   * Idempotent by construction: every statement is `IF NOT EXISTS`, and the
+   * `ALTER TABLE`s are guarded by a `table_info` check.
+   */
   function applySchema(): void {
     db.exec(SCHEMA_SQL);
+
+    const columns = new Set(
+      (db.prepare("PRAGMA table_info(guard_logs)").all() as { name: string }[]).map(
+        (row) => row.name,
+      ),
+    );
+    for (const column of ADDED_LOG_COLUMNS) {
+      if (columns.has(column.name)) continue;
+      db.exec(`ALTER TABLE guard_logs ADD COLUMN ${column.name} ${column.ddl}`);
+    }
   }
 
   applySchema();
@@ -335,8 +403,9 @@ export function sqliteStorage(options: SqliteStorageOptions = {}): GuardStorage 
     db.prepare(
       `INSERT INTO guard_logs (
          id, seq, status, timestamp, app, tool, verdict, agent_id, agent_json, session_json,
-         data_classes_json, rule_ids_json, duration_ms, payloads_json, justification, message
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         data_classes_json, rule_ids_json, duration_ms, payloads_json, justification,
+         justification_verdict_json, message
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       entry.id,
       nextSeq("guard_logs"),
@@ -353,6 +422,7 @@ export function sqliteStorage(options: SqliteStorageOptions = {}): GuardStorage 
       entry.durationMs,
       JSON.stringify(entry.payloads),
       entry.justification ?? null,
+      entry.justificationVerdict === undefined ? null : JSON.stringify(entry.justificationVerdict),
       entry.message ?? null,
     );
   }
@@ -561,13 +631,16 @@ export function sqliteStorage(options: SqliteStorageOptions = {}): GuardStorage 
           ...(completion.justification !== undefined
             ? { justification: completion.justification }
             : {}),
+          ...(completion.justificationVerdict !== undefined
+            ? { justificationVerdict: completion.justificationVerdict }
+            : {}),
           payloads: { ...existing.payloads, ...(completion.payloads ?? {}) },
         };
 
         db.prepare(
           `UPDATE guard_logs
            SET status = ?, verdict = ?, data_classes_json = ?, rule_ids_json = ?, duration_ms = ?,
-               payloads_json = ?, justification = ?, message = ?
+               payloads_json = ?, justification = ?, justification_verdict_json = ?, message = ?
            WHERE id = ?`,
         ).run(
           merged.status,
@@ -577,6 +650,9 @@ export function sqliteStorage(options: SqliteStorageOptions = {}): GuardStorage 
           merged.durationMs,
           JSON.stringify(merged.payloads),
           merged.justification ?? null,
+          merged.justificationVerdict === undefined
+            ? null
+            : JSON.stringify(merged.justificationVerdict),
           merged.message ?? null,
           callId,
         );
@@ -703,6 +779,56 @@ export function sqliteStorage(options: SqliteStorageOptions = {}): GuardStorage 
       const row = db.prepare("SELECT * FROM guard_vault WHERE token = ?").get(token) as
         VaultRow | undefined;
       return row ? rowToVaultEntry(row) : null;
+    },
+
+    async putConfirmation(entry: ConfirmationEntry): Promise<ConfirmationEntry> {
+      const put = db.transaction((): ConfirmationEntry => {
+        // Contract: storing evicts what has expired. Declined approvals are
+        // never consumed, so this is the only thing keeping the table bounded.
+        db.prepare("DELETE FROM guard_confirmations WHERE expires_at < ?").run(
+          new Date().toISOString(),
+        );
+
+        db.prepare(
+          `INSERT INTO guard_confirmations (id, app, tool, args_hash, call_id, issued_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET
+             app = excluded.app, tool = excluded.tool, args_hash = excluded.args_hash,
+             call_id = excluded.call_id, issued_at = excluded.issued_at,
+             expires_at = excluded.expires_at`,
+        ).run(
+          entry.id,
+          entry.app,
+          entry.tool,
+          entry.argsHash,
+          entry.callId,
+          entry.issuedAt,
+          entry.expiresAt,
+        );
+
+        const row = db.prepare("SELECT * FROM guard_confirmations WHERE id = ?").get(entry.id) as
+          ConfirmationRow | undefined;
+        if (!row) throw new Error("Confirmation vanished immediately after insert.");
+        return rowToConfirmation(row);
+      });
+
+      return put();
+    },
+
+    async consumeConfirmation(id: string): Promise<ConfirmationEntry | null> {
+      const consume = db.transaction((): ConfirmationEntry | null => {
+        const row = db.prepare("SELECT * FROM guard_confirmations WHERE id = ?").get(id) as
+          ConfirmationRow | undefined;
+        if (!row) return null;
+
+        // Single use, enforced by the write rather than by the read: whoever's
+        // DELETE reports a change is the one consumer that gets the entry, so a
+        // replay cannot slip through between the SELECT and the DELETE.
+        const deleted = db.prepare("DELETE FROM guard_confirmations WHERE id = ?").run(id).changes;
+        return deleted > 0 ? rowToConfirmation(row) : null;
+      });
+
+      return consume();
     },
   };
 }

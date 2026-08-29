@@ -77,7 +77,54 @@ describe("@webmcp-guard/storage-sqlite", () => {
     expect(tables).toContain("guard_rules");
     expect(tables).toContain("guard_logs");
     expect(tables).toContain("guard_vault");
+    expect(tables).toContain("guard_confirmations");
     db.close();
+  });
+
+  /**
+   * `CREATE TABLE IF NOT EXISTS` cannot widen a table that already exists, and
+   * the demo portal keeps its database file across restarts — so a column added
+   * in a later phase needs a real migration or every write breaks on upgrade.
+   */
+  it("adds columns to a guard_logs table that predates them", async () => {
+    const path = join(scratch, "migrate.db");
+
+    // A pre-Phase-5 log table: everything except justification_verdict_json.
+    const legacy = new Database(path);
+    legacy.exec(`
+      CREATE TABLE guard_logs (
+        id TEXT PRIMARY KEY, seq INTEGER NOT NULL, status TEXT NOT NULL,
+        timestamp TEXT NOT NULL, app TEXT NOT NULL, tool TEXT NOT NULL,
+        verdict TEXT NOT NULL, agent_id TEXT, agent_json TEXT NOT NULL,
+        session_json TEXT, data_classes_json TEXT NOT NULL, rule_ids_json TEXT NOT NULL,
+        duration_ms REAL NOT NULL, payloads_json TEXT NOT NULL, justification TEXT,
+        message TEXT
+      );
+    `);
+    legacy.close();
+
+    const storage = sqliteStorage({ path });
+    await storage.init();
+
+    const written = await storage.appendLog({
+      id: "upgraded",
+      timestamp: "2026-08-29T12:00:00.000Z",
+      app: "lakeside-portal",
+      tool: "export_patients",
+      verdict: "allow",
+      agent: {},
+      dataClasses: [],
+      ruleIds: [],
+      durationMs: 0,
+      payloads: {},
+      justification: "Care-gap review for Dr. Reyes.",
+      justificationVerdict: { verdict: "pass", reason: "Specific enough." },
+      status: "complete",
+    });
+
+    expect(written.justificationVerdict).toEqual({ verdict: "pass", reason: "Specific enough." });
+    expect((await storage.getLog("upgraded"))?.justificationVerdict?.verdict).toBe("pass");
+    await storage.close();
   });
 
   it("rejects a stored rule that no longer matches the schema", async () => {

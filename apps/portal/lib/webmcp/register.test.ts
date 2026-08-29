@@ -93,10 +93,17 @@ interface GuardCall {
   payload: Record<string, unknown>;
 }
 
-/** Records every guard round trip and answers with the given verdict. */
+/**
+ * Records every guard round trip and answers with the given verdict.
+ *
+ * Three endpoints now: the SDK reads `GET /policies/effective` once per tool at
+ * registration time (Phase 5 schema injection) before `/gate` and `/transform`
+ * ever run. `pipelineCalls` is the gate+transform pair one tool call makes.
+ */
 function guardFetchStub(options: { verdict?: string; message?: string } = {}) {
   const calls: GuardCall[] = [];
   const verdict = options.verdict ?? "allow";
+  const isPolicyCall = (url: string) => url.includes("/policies/effective");
 
   const fetchImpl = (async (input: unknown, init?: RequestInit) => {
     const url = String(input);
@@ -105,15 +112,22 @@ function guardFetchStub(options: { verdict?: string; message?: string } = {}) {
     const payload = envelope.payload ?? {};
     calls.push({ url, payload });
 
-    const response = url.endsWith("/gate")
+    const response = isPolicyCall(url)
       ? {
-          callId: "call-1",
-          verdict,
-          ...(verdict === "allow" ? { args: payload.args } : {}),
-          ...(options.message ? { message: options.message } : {}),
-          ruleIds: [],
+          requiresJustification: false,
+          minChars: null,
+          requiresConfirmation: false,
+          disabled: false,
         }
-      : { result: payload.result, classesFound: [], ruleIds: [] };
+      : url.endsWith("/gate")
+        ? {
+            callId: "call-1",
+            verdict,
+            ...(verdict === "allow" ? { args: payload.args } : {}),
+            ...(options.message ? { message: options.message } : {}),
+            ruleIds: [],
+          }
+        : { result: payload.result, classesFound: [], ruleIds: [] };
 
     return new Response(JSON.stringify({ version: WIRE_VERSION, payload: response }), {
       status: 200,
@@ -121,7 +135,13 @@ function guardFetchStub(options: { verdict?: string; message?: string } = {}) {
     });
   }) as unknown as typeof fetch;
 
-  return { fetchImpl, calls };
+  return {
+    fetchImpl,
+    calls,
+    get pipelineCalls() {
+      return calls.filter((call) => !isPolicyCall(call.url));
+    },
+  };
 }
 
 function makeGuard(fetchImpl?: typeof fetch) {
@@ -203,11 +223,17 @@ describe("registerPortalTools — document surface", () => {
     expect(modelContext.tools.size).toBe(7);
   });
 
-  it("passes the abort signal on every registration", async () => {
+  it("registers with a signal chained to the caller's, so aborting unregisters", async () => {
     await registerPortalTools({ signal: controller.signal, guard: makeGuard() });
+
+    // The SDK owns a controller per tool (it has to unregister to re-register
+    // when policy changes — docs/08), so these are not the caller's signal.
+    // What the caller still owns is the outcome, asserted in the next test.
     for (const call of modelContext.calls) {
-      expect(call.options?.signal).toBe(controller.signal);
+      expect(call.options?.signal).toBeInstanceOf(AbortSignal);
+      expect(call.options?.signal).not.toBe(controller.signal);
     }
+    expect(modelContext.tools.size).toBe(7);
   });
 
   it("unregisters every tool when the signal aborts", async () => {
@@ -381,11 +407,11 @@ describe("what the browser actually calls", () => {
 
     const result = await modelContext.execute("search_patients", { text: "hypertension" });
 
-    expect(guard.calls.map((call) => call.url)).toEqual([
+    expect(guard.pipelineCalls.map((call) => call.url)).toEqual([
       "/api/guard/gate",
       "/api/guard/transform",
     ]);
-    expect(guard.calls[0].payload).toMatchObject({
+    expect(guard.pipelineCalls[0].payload).toMatchObject({
       app: GUARD_APP,
       tool: "search_patients",
       args: { text: "hypertension" },
@@ -415,7 +441,7 @@ describe("what the browser actually calls", () => {
     expect(result).toBe(denial);
     expect(portalFetch).not.toHaveBeenCalled();
     // No transform round trip either: nothing ran, so there is no result.
-    expect(guard.calls.map((call) => call.url)).toEqual(["/api/guard/gate"]);
+    expect(guard.pipelineCalls.map((call) => call.url)).toEqual(["/api/guard/gate"]);
   });
 
   it("streams the pipeline to the Agent Activity drawer", async () => {
