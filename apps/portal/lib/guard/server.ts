@@ -1,4 +1,5 @@
 import { createGuardServer, type GuardServer } from "@webmcp-guard/server";
+import type { GuardStorage } from "@webmcp-guard/shared";
 import { sqliteStorage } from "@webmcp-guard/storage-sqlite";
 import type BetterSqlite3 from "better-sqlite3";
 
@@ -116,6 +117,12 @@ const GLOBAL_KEY = Symbol.for("lakeside.portal.guard-server");
 
 interface CachedGuard {
   server: GuardServer;
+  /**
+   * The adapter the server was built on, shared rather than re-created so the
+   * portal's own audit writes (`lib/guard/audit.ts`) go through exactly one
+   * `guard_logs` writer.
+   */
+  storage: GuardStorage;
   /** The connection the storage adapter adopted, so a reopened db rebuilds it. */
   database: BetterSqlite3.Database;
 }
@@ -139,11 +146,31 @@ export function resetGuardServerWarning(): void {
  * and reopen it, and `getDb()` reopens after a close).
  */
 export function getGuardServer(): GuardServer {
+  return cachedGuard().server;
+}
+
+/**
+ * The same storage adapter the guard server writes through.
+ *
+ * Exposed for one caller: the portal's masked-field reveal route, which records
+ * a human access event in the audit log (`docs/05` stretch item). It writes a
+ * `LogRecord` through this interface rather than inventing a second table, so a
+ * reveal is queryable, filterable and exportable exactly like a tool call.
+ */
+export function getGuardStorage(): GuardStorage {
+  return cachedGuard().storage;
+}
+
+/**
+ * Builds (or returns) the one guard server and the one storage adapter this
+ * process uses, keyed on the database connection they were built against.
+ */
+function cachedGuard(): CachedGuard {
   const store = globalThis as GuardGlobal;
   const database = getDb();
 
   const cached = store[GLOBAL_KEY];
-  if (cached && cached.database === database) return cached.server;
+  if (cached && cached.database === database) return cached;
 
   const secrets = resolveGuardSecrets();
   if (secrets.fellBack.length > 0 && !hasWarnedInsecure) {
@@ -155,11 +182,13 @@ export function getGuardServer(): GuardServer {
     console.warn(portalSessionSecretWarning());
   }
 
+  // Adoption mode: the guard's tables live alongside the portal's own rather
+  // than in a second file, and the adapter never closes a handle it did not
+  // open (docs/05: "WebMCP Guard's tables live alongside it").
+  const storage = sqliteStorage({ database });
+
   const server = createGuardServer({
-    // Adoption mode: the guard's tables live alongside the portal's own rather
-    // than in a second file, and the adapter never closes a handle it did not
-    // open (docs/05: "WebMCP Guard's tables live alongside it").
-    storage: sqliteStorage({ database }),
+    storage,
     orgSecret: secrets.orgSecret,
     vaultKey: secrets.vaultKey,
     adminToken: secrets.adminToken,
@@ -186,8 +215,9 @@ export function getGuardServer(): GuardServer {
     ...(secrets.consoleOrigin !== undefined ? { consoleOrigin: secrets.consoleOrigin } : {}),
   });
 
-  store[GLOBAL_KEY] = { server, database };
-  return server;
+  const entry: CachedGuard = { server, storage, database };
+  store[GLOBAL_KEY] = entry;
+  return entry;
 }
 
 /** Test helper: drops the memoised server so the next call rebuilds it. */

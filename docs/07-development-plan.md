@@ -180,8 +180,12 @@ suite green).
       heuristic fallback on error _(**interface + config plumbing shipped**
       (`GuardServerConfig.evaluator`, `JustificationEvaluator`), LLM
       implementation deliberately skipped)_
-- [ ] Stretch (skip if behind): masked-at-rest UI fields with logged
-      click-to-reveal (anti-circumvention demo, see docs/05 + threat model)
+- [x] Stretch: masked-at-rest UI fields with logged click-to-reveal
+      (anti-circumvention demo, see docs/05 + threat model) _(the chart's SSN,
+      DOB, phone and e-mail are masked server-side and never reach the browser;
+      `POST /api/portal/reveal-field` writes a `ui_reveal_field` audit entry
+      before returning a value; roster left unmasked on purpose — its rows are
+      the same summary `search_patients` returns)_
 - [x] Review gate (**Fable** — critical phase, suite green) — APPROVED
 - [x] **Commit: `feat: posture checks, confirmation, justification`**
 
@@ -418,3 +422,21 @@ what's next, deviations/decisions._
   sentence in the video rather than a surprise; (2) mock login is a header
   switcher, not a `/login` page; (3) `apps/portal/data` was wiped after the run.
   Next: review gate, then Phase 7.
+- 2026-08-29 — Phase 6 Fable review APPROVED (cookie module read directly:
+  domain-separated key derivation, sign-canonical-not-encoding, persona-list
+  validation; resolveSession precedence proven via curl). Committed; 1139
+  tests green.
+- 2026-08-29 — Phase 7 docs session. Root README (before/after tour with
+  real captures, threat model, literal registerTool excerpt, the three
+  WebMCP browser discrepancies), packages/sdk/README.md integration guide,
+  docs/submission/{devpost-text,video-script}.md. Clean-clone quickstart
+  verified for real (1139 tests, both apps booted on 4000/4001) and it
+  caught a real gap: without an env file the portal serves no CORS headers
+  and the console cannot connect — README now leads with the env copy step.
+  Repo-wide prettier drift fixed (pnpm format), suite green, committed.
+  Two doc-vs-code inaccuracies corrected in prose rather than claimed
+  (annotations are carried not policy-derived; toolchange is a portal
+  listener not an SDK feature). Remaining Phase 7 items blocked on the
+  user: GitHub publish (classifier-denied), Render/Vercel deploys, live
+  ChatGPT-browser rehearsal, video recording, Devpost submission. Building
+  the masked-at-rest stretch while waiting.
