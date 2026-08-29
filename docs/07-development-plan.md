@@ -440,3 +440,14 @@ what's next, deviations/decisions._
   user: GitHub publish (classifier-denied), Render/Vercel deploys, live
   ChatGPT-browser rehearsal, video recording, Devpost submission. Building
   the masked-at-rest stretch while waiting.
+- 2026-08-29 — Masked-at-rest stretch built and committed (1160 tests).
+  Fable-reviewed via the strongest available evidence: HTML grep proves
+  SSN/email never ship in the served page, live-DOM e2e proves
+  reveal → re-mask discards the value, and every reveal writes an audited
+  entry under the server-resolved persona. Full demo rehearsal then run
+  sequentially on one fresh DB — all five video-script beats produced
+  exactly the quoted strings (search tokens, token→note round trip,
+  justification deny→pass with verdict logged, confirmation modal decline
+  with patient intact, complete audit trail). ALL autonomous work is now
+  done. Awaiting user for: GitHub publish, Render/Vercel deploys,
+  ChatGPT-browser validation, video recording, Devpost submission.
