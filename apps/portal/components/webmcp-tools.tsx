@@ -12,10 +12,12 @@ import {
 import { PORTAL_DATA_CHANGED_EVENT, setWebMcpStatus } from "@/lib/webmcp/status";
 
 /**
- * Mounts the portal's WebMCP tools for the lifetime of the app shell.
+ * Mounts the portal's seven tools — through WebMCP Guard — for the lifetime of
+ * the app shell.
  *
  * Renders nothing. Lives in the root layout so the tools are available on every
- * page — an agent should not have to navigate to /patients before it can search.
+ * page, and every call an agent makes to them runs gate → execute → transform
+ * against `/api/guard` before a result reaches the model.
  *
  * The AbortController is per mount: React StrictMode runs mount → cleanup →
  * mount in development, and `controller.abort()` in the cleanup unregisters the

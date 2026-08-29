@@ -1,26 +1,25 @@
-import { type PortalToolContext, createPortalTools, toModelContextTool } from "./tools";
+import { type Guard, type WebMcpSurface, detectWebMcpSurface } from "@webmcp-guard/sdk";
+
+import { getGuard } from "./guard";
+import { type PortalToolContext, createPortalTools } from "./tools";
 
 /**
- * Raw WebMCP registration for the Lakeside Medical portal.
+ * Registration of the Lakeside Medical tools, **through WebMCP Guard**.
  *
- * This is the Phase 1 "before" path: the seven tools go straight onto
- * `document.modelContext` with nothing in between. Phase 2 swaps the two
- * `registerTool` calls below for `@webmcp-guard/sdk`, which keeps the same
- * literal call inside the SDK.
+ * Phase 2 replaced the raw `document.modelContext.registerTool` calls that used
+ * to live here with `guard.registerTool`, which wraps each tool's `execute` in
+ * the gate → execute → transform pipeline before handing it to the browser. The
+ * literal WebMCP call the challenge requires now lives in one place for the
+ * whole product: `packages/sdk/src/webmcp.ts`.
  *
- * Two constraints shape this file:
- *
- *  1. The challenge requires a plainly visible `document.modelContext.registerTool(`
- *     in the repository, so the call is written out literally rather than routed
- *     through a resolved variable.
- *  2. docs/03 and docs/08 require feature detection across both surfaces
- *     (`document` first, then the older `navigator` one) and graceful
- *     degradation when neither exists — the portal must stay fully usable for
- *     humans in a browser with no WebMCP at all.
+ * What this module still owns is portal-specific and unchanged in spirit:
+ * feature detection for the header chip, a live tool count, and the
+ * one-controller-per-mount contract React StrictMode needs (docs/08).
  */
 
-/** Which WebMCP entry point (if any) this browser exposes. */
-export type WebMcpSurface = "document" | "navigator" | "unavailable";
+/** Which WebMCP entry point (if any) this browser exposes. Detected by the SDK. */
+export type { WebMcpSurface };
+export { detectWebMcpSurface };
 
 export interface RegisterResult {
   surface: WebMcpSurface;
@@ -36,19 +35,14 @@ export interface RegisterPortalToolsOptions {
    */
   signal: AbortSignal;
   context?: PortalToolContext;
+  /** Injectable guard — the tests pass one, the browser uses the singleton. */
+  guard?: Guard;
 }
 
 /** Hint shown to a developer (and in the header chip) when WebMCP is missing. */
 export const WEBMCP_ENABLE_HINT =
   "WebMCP not detected. Enable chrome://flags/#enable-webmcp-testing and relaunch Chrome, " +
   "or open this page in ChatGPT's in-app browser.";
-
-let hasWarned = false;
-
-/** Test seam: lets a test observe the once-only console warning more than once. */
-export function resetWebMcpWarning(): void {
-  hasWarned = false;
-}
 
 /** Returns the live model context for event wiring, or `null` when unsupported. */
 export function resolveModelContext(): WebMCP.ModelContext | null {
@@ -57,52 +51,30 @@ export function resolveModelContext(): WebMCP.ModelContext | null {
   return null;
 }
 
-/** Feature detection only — never registers anything. */
-export function detectWebMcpSurface(): WebMcpSurface {
-  if (typeof document !== "undefined" && document.modelContext) return "document";
-  if (typeof navigator !== "undefined" && navigator.modelContext) return "navigator";
-  return "unavailable";
-}
-
 /**
- * Registers all seven portal tools against whichever WebMCP surface is present.
+ * Registers all seven portal tools with the guard.
  *
- * Returns `{ surface: "unavailable", registered: [] }` (after one console
- * warning) when there is no WebMCP — callers use that to render the gray status
- * chip rather than to fail.
+ * Never throws and never blocks the page: `guard.registerTool` reports failure
+ * by resolving with `registered: false` (no WebMCP, an already-aborted signal,
+ * or a definition the browser rejected), so a browser without WebMCP simply
+ * yields `{ surface: "unavailable", registered: [] }` and the gray status chip.
  */
 export async function registerPortalTools(
   options: RegisterPortalToolsOptions,
 ): Promise<RegisterResult> {
   const { signal } = options;
-  const definitions = createPortalTools(options.context);
+  const guard = options.guard ?? getGuard();
   const registered: string[] = [];
 
-  if (typeof document !== "undefined" && document.modelContext) {
-    for (const definition of definitions) {
-      // The signal may already be aborted: StrictMode's first mount is torn down
-      // immediately, and registering against a dead signal would leak a tool.
-      if (signal.aborted) break;
-      await document.modelContext.registerTool(toModelContextTool(definition), { signal });
-      registered.push(definition.name);
-    }
-    return { surface: "document", registered };
+  for (const definition of createPortalTools(options.context)) {
+    // The signal may already be aborted: StrictMode's first mount is torn down
+    // immediately, and registering against a dead signal would leak a tool.
+    if (signal.aborted) break;
+    const result = await guard.registerTool(definition, { signal });
+    if (result.registered) registered.push(result.tool);
   }
 
-  if (typeof navigator !== "undefined" && navigator.modelContext) {
-    for (const definition of definitions) {
-      if (signal.aborted) break;
-      await navigator.modelContext.registerTool(toModelContextTool(definition), { signal });
-      registered.push(definition.name);
-    }
-    return { surface: "navigator", registered };
-  }
-
-  if (!hasWarned) {
-    hasWarned = true;
-    console.warn(`[Lakeside Medical] ${WEBMCP_ENABLE_HINT}`);
-  }
-  return { surface: "unavailable", registered: [] };
+  return { surface: guard.surface, registered };
 }
 
 /** Live count of tools this document exposes, for the header status chip. */

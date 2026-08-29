@@ -135,6 +135,10 @@ importers:
         version: 0.1.5
 
   packages/sdk:
+    dependencies:
+      '@webmcp-guard/shared':
+        specifier: workspace:*
+        version: link:../shared
     devDependencies:
       typescript:
         specifier: ^5.9.3
@@ -144,6 +148,13 @@ importers:
         version: 4.1.11(@types/node@26.4.0)(vite@8.2.2(@types/node@26.4.0)(jiti@2.7.0))
 
   packages/server:
+    dependencies:
+      '@webmcp-guard/shared':
+        specifier: workspace:*
+        version: link:../shared
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.9.3
@@ -166,6 +177,10 @@ importers:
         version: 4.1.11(@types/node@26.4.0)(vite@8.2.2(@types/node@26.4.0)(jiti@2.7.0))
 
   packages/storage-memory:
+    dependencies:
+      '@webmcp-guard/shared':
+        specifier: workspace:*
+        version: link:../shared
     devDependencies:
       typescript:
         specifier: ^5.9.3
@@ -175,7 +190,17 @@ importers:
         version: 4.1.11(@types/node@26.4.0)(vite@8.2.2(@types/node@26.4.0)(jiti@2.7.0))
 
   packages/storage-sqlite:
+    dependencies:
+      '@webmcp-guard/shared':
+        specifier: workspace:*
+        version: link:../shared
+      better-sqlite3:
+        specifier: ^13.0.3
+        version: 13.0.3
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^9.6.0
+        version: 9.6.0
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

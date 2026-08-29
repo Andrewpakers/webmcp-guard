@@ -11,12 +11,17 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./storage-contract": {
+      "types": "./src/storage-contract.ts",
+      "default": "./src/storage-contract.ts"
     }
   },
   "files": [
     "src"
   ],
   "scripts": {
+    "test": "vitest run --root ../.. --project @webmcp-guard/shared",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

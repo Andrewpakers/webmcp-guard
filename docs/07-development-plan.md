@@ -66,24 +66,41 @@ suite green).
 
 ## Phase 2 — SDK core: wrap, gate, log
 
-- [ ] `@webmcp-guard/storage-memory` + `@webmcp-guard/storage-sqlite` implementing
-      `GuardStorage` (policies, logs, vault, stats)
-- [ ] `@webmcp-guard/server`: `createGuardServer`, Next.js catch-all adapter,
+- [x] `@webmcp-guard/storage-memory` + `@webmcp-guard/storage-sqlite` implementing
+      `GuardStorage` (policies, logs, vault, stats) _(one shared contract suite
+      runs against both; sqlite supports `{database}` adoption so guard tables
+      live inside the host app's own DB file)_
+- [x] `@webmcp-guard/server`: `createGuardServer`, Next.js catch-all adapter,
       `/gate` (policy match + verdict, no transforms yet), `/transform`
-      (logging passthrough), `/policies` CRUD, `/logs` query
-- [ ] Policy engine: ordered rule matching per `04-sdk-requirements.md`,
-      seeded default policies from `05-demo-app-requirements.md`
-- [ ] `@webmcp-guard/sdk`: `createGuard`, `registerTool` wrapper (visible
+      (logging passthrough), `/policies` CRUD, `/logs` query _(+ `/stats`,
+      `GET /policies/:id`, `PUT /policies` for defaultAction, reorder route,
+      opt-in exact-origin CORS)_
+- [x] Policy engine: ordered rule matching per `04-sdk-requirements.md`,
+      seeded default policies from `05-demo-app-requirements.md` _(two-aspect
+      resolution: gate verdict + transform matrix independently, first match
+      each; `agents`/`dataClasses` matchers explicitly inert until Ph5/Ph3;
+      justification/confirmation rules seeded DISABLED until Phase 5; TEMP
+      enabled deny rule on delete_patient for the Phase 2 demo)_
+- [x] `@webmcp-guard/sdk`: `createGuard`, `registerTool` wrapper (visible
       `document.modelContext.registerTool` call), execute pipeline
       gate → execute → transform → return, structured agent-facing errors,
-      AbortSignal passthrough
-- [ ] Portal migrated from raw registration to WebMCP Guard; Agent Activity
-      drawer showing live events
-- [ ] Deny path works end to end (temporary deny rule on `delete_patient`);
-      agent receives legible policy message; log entry written
-- [ ] Unit tests: policy matching order, verdict matrix
-- [ ] Review gate (**Fable** — critical phase, suite green)
-- [ ] **Commit: `feat(sdk): core wrapper, policy gate, audit logging`**
+      AbortSignal passthrough _(fail-closed everywhere; literal registerTool
+      call lives in packages/sdk/src/webmcp.ts; events API + ring buffer for
+      the Agent Activity drawer; React helper is a dependency-free factory)_
+- [x] Portal migrated from raw registration to WebMCP Guard; Agent Activity
+      drawer showing live events _(guard server mounted inside the portal at
+      `/api/guard`, sharing the portal's own SQLite connection; missing
+      `GUARD_*` env vars fall back to obviously-insecure dev defaults with a
+      one-time server warning so a clean clone boots — **README must say this
+      out loud in Phase 7**)_
+- [x] Deny path works end to end (temporary deny rule on `delete_patient`);
+      agent receives legible policy message; log entry written _(verified by
+      curl against `/api/guard/gate`, by `scripts/webmcp-e2e.mjs call
+      delete_patient` in headless Chromium — patient still present afterwards —
+      and in `GET /api/guard/logs`)_
+- [x] Unit tests: policy matching order, verdict matrix
+- [x] Review gate (**Fable** — critical phase, suite green) — APPROVED
+- [x] **Commit: `feat(sdk): core wrapper, policy gate, audit logging`**
 
 ## Phase 3 — Data controls (the headline feature)
 
@@ -205,3 +222,22 @@ what's next, deviations/decisions._
   fragility of the determinism test (address before Phase 3), untested
   status store, Render `$PORT` + Next ESLint plugin (Phase 7). Next:
   Phase 2 (SDK core).
+- 2026-08-29 — Phase 2 complete (SDK core: wrap, gate, log). 29 files / 552
+  tests green; Fable review APPROVED. Three parallel/serial sub-agent tasks:
+  (A) storage adapters + server + policy engine, (B) browser SDK, (C) portal
+  migration + Agent Activity drawer. Orchestrator pre-added
+  `GateResponse.callId` + `GateRequest.toolTags` to the wire contract and
+  pre-wired all package deps (single `pnpm install`) to avoid lockfile races
+  between parallel agents. Deviations/decisions of record: log verdict
+  vocabulary is the GateVerdict enum (no "transformed" — console derives it
+  from `dataClasses.length`); `/gate`+`/transform` unauthenticated by design
+  (host-app session is the boundary; documented in server.ts); missing
+  GUARD_* env vars fall back to obviously-insecure dev defaults with a
+  server warning (clean-clone quickstart; README must disclose); server
+  tests import storage-memory relatively (formalize as devDependency
+  later); SDK carries no webmcp-types dep (structural types; literal
+  registerTool call is in webmcp.ts with the host passed as a parameter
+  named `document`). Phase 5 needs a non-admin `/policies/effective`
+  endpoint for registration-time policy fetch. Deny path verified: curl,
+  headless-Chromium tool call (patient survived), and the audit log all
+  agree. Next: Phase 3 (classification/tokenization/detokenization).

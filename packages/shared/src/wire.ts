@@ -79,6 +79,12 @@ export const GateRequestSchema = z
     app: z.string().min(1),
     tool: z.string().min(1),
     args: JsonObjectSchema,
+    /**
+     * Tags the host page attached to the tool at registration (e.g.
+     * "destructive", "phi"). Reported by the page's own SDK — trusted to the
+     * same degree as the page itself, which is the trust boundary anyway.
+     */
+    toolTags: z.array(z.string().min(1)).optional(),
     posture: PostureSnapshotSchema.optional(),
     sessionContext: SessionContextSchema.optional(),
     /** One-time id issued by a previous `require-confirmation` verdict. */
@@ -90,6 +96,11 @@ export type GateRequest = z.infer<typeof GateRequestSchema>;
 
 export const GateResponseSchema = z
   .object({
+    /**
+     * Server-issued id for this tool call. The SDK passes it back as
+     * `TransformRequest.callId` so gate + transform land in one log entry.
+     */
+    callId: z.string().min(1),
     verdict: GateVerdictSchema,
     /** Detokenized args to execute with. Present only when verdict is `allow`. */
     args: JsonObjectSchema.optional(),

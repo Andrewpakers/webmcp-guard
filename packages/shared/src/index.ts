@@ -9,3 +9,10 @@ export * from "./data-class";
 export * from "./policy";
 export * from "./wire";
 export * from "./log";
+export * from "./storage";
+
+/**
+ * The storage conformance kit is deliberately *not* re-exported here: it
+ * imports `vitest`, which has no business in a browser bundle. Adapter authors
+ * import it from the `@webmcp-guard/shared/storage-contract` subpath instead.
+ */

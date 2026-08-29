@@ -1,15 +1,15 @@
 /**
  * The seven Lakeside Medical WebMCP tools (docs/05 § "WebMCP tools").
  *
- * ⚠️ Phase 1 registers these **raw**: no policy gate, no tokenization, no audit
- * log. `get_patient` hands the agent a Social Security number, `export_patients`
- * dumps the whole roster, and `delete_patient` deletes without asking anybody.
- * That is deliberate — it is the "before" picture the demo video opens on, and
- * Phase 2 replaces `registerPortalTools` with the WebMCP Guard wrapper without
- * changing a line of this file.
+ * These are the site's *unguarded* implementations: `execute` talks straight to
+ * `app/api/portal/*`, exactly as it did in Phase 1 when the tools were
+ * registered raw. Nothing here knows about policy — `lib/webmcp/register.ts`
+ * hands each definition to `guard.registerTool`, and the SDK wraps `execute` in
+ * gate → execute → transform on the way to the browser. That separation is the
+ * product claim: a host app keeps its tools and gets the controls.
  *
- * Definitions live here, separate from registration, so they can be unit-tested
- * without a browser and reused by the guard SDK later.
+ * `tags` is the one guard-only field. The SDK strips it before the browser sees
+ * the definition and sends it to the policy engine on the gate request instead.
  */
 
 /** Policy tags from docs/05. Not part of the WebMCP surface — the guard reads them. */
@@ -465,15 +465,4 @@ export function createPortalTools(context: PortalToolContext = {}): PortalToolDe
       },
     },
   ];
-}
-
-/** Drops the guard-only `tags` field so what reaches `registerTool` is pure WebMCP. */
-export function toModelContextTool(definition: PortalToolDefinition): WebMCP.ModelContextTool {
-  return {
-    name: definition.name,
-    description: definition.description,
-    inputSchema: definition.inputSchema,
-    annotations: definition.annotations,
-    execute: definition.execute,
-  };
 }

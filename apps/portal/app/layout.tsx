@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { AgentActivityDrawer } from "@/components/agent-activity-drawer";
 import { LakesideWordmark } from "@/components/lakeside-logo";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { WebMcpStatusChip } from "@/components/webmcp-status-chip";
@@ -16,10 +17,12 @@ export const metadata: Metadata = {
 };
 
 /**
- * App shell: fixed sidebar, header with the WebMCP status chip, and the
- * synthetic-data notice pinned to the bottom of every page (docs/05).
+ * App shell: fixed sidebar, header with the WebMCP Guard status chip and the
+ * Agent Activity drawer, and the synthetic-data notice pinned to the bottom of
+ * every page (docs/05).
  *
- * `<WebMcpTools />` sits here so the seven tools are registered on every route.
+ * `<WebMcpTools />` sits here so the seven guarded tools are registered on every
+ * route — an agent should not have to navigate anywhere before it can search.
  */
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
@@ -50,6 +53,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               </div>
               <div className="flex items-center gap-3">
                 <WebMcpStatusChip />
+                <AgentActivityDrawer />
               </div>
             </header>
 

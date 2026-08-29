@@ -1,19 +1,25 @@
+import { createGuard, resetWebMcpWarning } from "@webmcp-guard/sdk";
+import { WIRE_VERSION } from "@webmcp-guard/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { GUARD_APP, GUARD_ENDPOINT } from "./guard";
 import {
   WEBMCP_ENABLE_HINT,
   countRegisteredTools,
   detectWebMcpSurface,
   registerPortalTools,
-  resetWebMcpWarning,
   resolveModelContext,
 } from "./register";
 import { PORTAL_TOOL_NAMES, createPortalTools } from "./tools";
 
 /**
- * These run in the node environment with a hand-rolled `modelContext` stub
- * rather than jsdom: WebMCP does not exist in jsdom either, so a stub is needed
- * regardless, and the registration code only touches two globals.
+ * Registration now goes through `@webmcp-guard/sdk`, so these tests need two
+ * doubles: a `modelContext` stub (WebMCP exists in no test environment — jsdom
+ * included, which is why this suite stays in plain node) and a `fetch` stub for
+ * the guard's `/gate` and `/transform` round trips.
+ *
+ * The pattern mirrors `packages/sdk/src/test-support.ts`, copied rather than
+ * imported: that module is intentionally not part of the SDK's public exports.
  */
 
 interface RegisterCall {
@@ -73,6 +79,53 @@ class StubModelContext extends EventTarget {
       ),
     );
   }
+
+  /** Invokes a live tool the way Chromium 151 does: input only, no context. */
+  execute(name: string, input?: unknown): Promise<unknown> {
+    const tool = this.tools.get(name);
+    if (!tool) throw new Error(`no live tool named ${name}`);
+    return Promise.resolve((tool.execute as (input?: unknown) => unknown)(input));
+  }
+}
+
+interface GuardCall {
+  url: string;
+  payload: Record<string, unknown>;
+}
+
+/** Records every guard round trip and answers with the given verdict. */
+function guardFetchStub(options: { verdict?: string; message?: string } = {}) {
+  const calls: GuardCall[] = [];
+  const verdict = options.verdict ?? "allow";
+
+  const fetchImpl = (async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    const body = typeof init?.body === "string" ? init.body : "{}";
+    const envelope = JSON.parse(body) as { payload?: Record<string, unknown> };
+    const payload = envelope.payload ?? {};
+    calls.push({ url, payload });
+
+    const response = url.endsWith("/gate")
+      ? {
+          callId: "call-1",
+          verdict,
+          ...(verdict === "allow" ? { args: payload.args } : {}),
+          ...(options.message ? { message: options.message } : {}),
+          ruleIds: [],
+        }
+      : { result: payload.result, classesFound: [], ruleIds: [] };
+
+    return new Response(JSON.stringify({ version: WIRE_VERSION, payload: response }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+
+  return { fetchImpl, calls };
+}
+
+function makeGuard(fetchImpl?: typeof fetch) {
+  return createGuard({ endpoint: GUARD_ENDPOINT, app: GUARD_APP, fetchImpl });
 }
 
 const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
@@ -141,8 +194,8 @@ describe("registerPortalTools — document surface", () => {
     controller = new AbortController();
   });
 
-  it("registers all seven tools, in order", async () => {
-    const result = await registerPortalTools({ signal: controller.signal });
+  it("registers all seven tools, in order, through the guard", async () => {
+    const result = await registerPortalTools({ signal: controller.signal, guard: makeGuard() });
 
     expect(result.surface).toBe("document");
     expect(result.registered).toEqual([...PORTAL_TOOL_NAMES]);
@@ -151,14 +204,14 @@ describe("registerPortalTools — document surface", () => {
   });
 
   it("passes the abort signal on every registration", async () => {
-    await registerPortalTools({ signal: controller.signal });
+    await registerPortalTools({ signal: controller.signal, guard: makeGuard() });
     for (const call of modelContext.calls) {
       expect(call.options?.signal).toBe(controller.signal);
     }
   });
 
   it("unregisters every tool when the signal aborts", async () => {
-    await registerPortalTools({ signal: controller.signal });
+    await registerPortalTools({ signal: controller.signal, guard: makeGuard() });
     expect(modelContext.tools.size).toBe(7);
 
     controller.abort();
@@ -167,7 +220,7 @@ describe("registerPortalTools — document surface", () => {
 
   it("registers nothing when the signal is already aborted (StrictMode's first mount)", async () => {
     controller.abort();
-    const result = await registerPortalTools({ signal: controller.signal });
+    const result = await registerPortalTools({ signal: controller.signal, guard: makeGuard() });
 
     expect(result.registered).toEqual([]);
     expect(modelContext.calls).toHaveLength(0);
@@ -176,9 +229,9 @@ describe("registerPortalTools — document surface", () => {
 
   it("leaves a second mount with a live registration after the first is aborted", async () => {
     const first = new AbortController();
-    await registerPortalTools({ signal: first.signal });
+    await registerPortalTools({ signal: first.signal, guard: makeGuard() });
     const second = new AbortController();
-    await registerPortalTools({ signal: second.signal });
+    await registerPortalTools({ signal: second.signal, guard: makeGuard() });
 
     first.abort();
 
@@ -188,7 +241,7 @@ describe("registerPortalTools — document surface", () => {
   });
 
   it("counts the tools the document exposes", async () => {
-    await registerPortalTools({ signal: controller.signal });
+    await registerPortalTools({ signal: controller.signal, guard: makeGuard() });
     await expect(countRegisteredTools()).resolves.toBe(7);
   });
 });
@@ -200,7 +253,7 @@ describe("registerPortalTools — legacy navigator surface", () => {
     defineGlobal("navigator", { modelContext });
 
     const controller = new AbortController();
-    const result = await registerPortalTools({ signal: controller.signal });
+    const result = await registerPortalTools({ signal: controller.signal, guard: makeGuard() });
 
     expect(result.surface).toBe("navigator");
     expect(result.registered).toEqual([...PORTAL_TOOL_NAMES]);
@@ -215,11 +268,18 @@ describe("registerPortalTools — no WebMCP at all", () => {
   it("degrades quietly and warns exactly once", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const first = await registerPortalTools({ signal: new AbortController().signal });
-    const second = await registerPortalTools({ signal: new AbortController().signal });
+    const first = await registerPortalTools({
+      signal: new AbortController().signal,
+      guard: makeGuard(),
+    });
+    const second = await registerPortalTools({
+      signal: new AbortController().signal,
+      guard: makeGuard(),
+    });
 
     expect(first).toEqual({ surface: "unavailable", registered: [] });
     expect(second).toEqual({ surface: "unavailable", registered: [] });
+    // The SDK owns the warning now — one per page load, not one per tool.
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0][0])).toContain("chrome://flags/#enable-webmcp-testing");
     expect(WEBMCP_ENABLE_HINT).toContain("ChatGPT");
@@ -234,7 +294,7 @@ describe("registered tool metadata", () => {
   it("matches the annotations docs/05 specifies", async () => {
     const modelContext = new StubModelContext();
     defineGlobal("document", { modelContext });
-    await registerPortalTools({ signal: new AbortController().signal });
+    await registerPortalTools({ signal: new AbortController().signal, guard: makeGuard() });
 
     const readOnly = (name: string) => modelContext.tools.get(name)?.annotations?.readOnlyHint;
     const untrusted = (name: string) =>
@@ -256,8 +316,10 @@ describe("registered tool metadata", () => {
   it("does not leak the guard-only `tags` field into the WebMCP payload", async () => {
     const modelContext = new StubModelContext();
     defineGlobal("document", { modelContext });
-    await registerPortalTools({ signal: new AbortController().signal });
+    await registerPortalTools({ signal: new AbortController().signal, guard: makeGuard() });
 
+    // The SDK builds the browser-facing definition field by field; the portal no
+    // longer needs a stripping layer of its own.
     for (const call of modelContext.calls) {
       expect(Object.keys(call.tool).sort()).toEqual([
         "annotations",
@@ -289,5 +351,98 @@ describe("registered tool metadata", () => {
       export_patients: ["read", "phi", "bulk", "destructive-adjacent"],
       delete_patient: ["write", "destructive"],
     });
+  });
+});
+
+describe("what the browser actually calls", () => {
+  it("runs gate → execute → transform and reports the tags to the policy engine", async () => {
+    const modelContext = new StubModelContext();
+    defineGlobal("document", { modelContext });
+
+    const guard = guardFetchStub();
+    // The portal's own API is stubbed too: this asserts the pipeline order, not
+    // the repository (which `app/api/portal/routes.test.ts` covers).
+    const portalFetch = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, total: 1, patients: [{ mrn: "LM-100001" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    await registerPortalTools({
+      signal: new AbortController().signal,
+      guard: makeGuard(guard.fetchImpl),
+      context: { fetchImpl: portalFetch as unknown as typeof fetch },
+    });
+
+    const result = await modelContext.execute("search_patients", { text: "hypertension" });
+
+    expect(guard.calls.map((call) => call.url)).toEqual([
+      "/api/guard/gate",
+      "/api/guard/transform",
+    ]);
+    expect(guard.calls[0].payload).toMatchObject({
+      app: GUARD_APP,
+      tool: "search_patients",
+      args: { text: "hypertension" },
+      toolTags: ["read", "phi"],
+    });
+    // The site's own execute ran, once, between the two round trips.
+    expect(portalFetch).toHaveBeenCalledTimes(1);
+    expect(String(result)).toContain("LM-100001");
+  });
+
+  it("returns the policy message and never runs the tool when the gate denies", async () => {
+    const modelContext = new StubModelContext();
+    defineGlobal("document", { modelContext });
+
+    const denial = "Deleting patient records from an agent is blocked by organization policy.";
+    const guard = guardFetchStub({ verdict: "deny", message: denial });
+    const portalFetch = vi.fn(async () => new Response("{}", { status: 200 }));
+
+    await registerPortalTools({
+      signal: new AbortController().signal,
+      guard: makeGuard(guard.fetchImpl),
+      context: { fetchImpl: portalFetch as unknown as typeof fetch },
+    });
+
+    const result = await modelContext.execute("delete_patient", { patient: "LM-100001" });
+
+    expect(result).toBe(denial);
+    expect(portalFetch).not.toHaveBeenCalled();
+    // No transform round trip either: nothing ran, so there is no result.
+    expect(guard.calls.map((call) => call.url)).toEqual(["/api/guard/gate"]);
+  });
+
+  it("streams the pipeline to the Agent Activity drawer", async () => {
+    const modelContext = new StubModelContext();
+    defineGlobal("document", { modelContext });
+
+    const guard = guardFetchStub();
+    const pageGuard = makeGuard(guard.fetchImpl);
+    const seen: string[] = [];
+    pageGuard.subscribe((event) => seen.push(event.type));
+
+    await registerPortalTools({
+      signal: new AbortController().signal,
+      guard: pageGuard,
+      context: {
+        fetchImpl: (async () =>
+          new Response(JSON.stringify({ ok: true, appointments: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          })) as unknown as typeof fetch,
+      },
+    });
+
+    await modelContext.execute("list_appointments", {});
+
+    expect(seen).toEqual(["gate", "executed", "transformed"]);
+    expect(pageGuard.recentEvents().map((event) => event.tool)).toEqual([
+      "list_appointments",
+      "list_appointments",
+      "list_appointments",
+    ]);
   });
 });

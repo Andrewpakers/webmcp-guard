@@ -17,10 +17,14 @@
     "src"
   ],
   "scripts": {
+    "test": "vitest run --root ../.. --project @webmcp-guard/storage-memory",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
     "vitest": "^4.1.11"
+  },
+  "dependencies": {
+    "@webmcp-guard/shared": "workspace:*"
   }
 }

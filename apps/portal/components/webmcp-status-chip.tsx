@@ -3,14 +3,20 @@
 import { useSyncExternalStore } from "react";
 
 import { WEBMCP_ENABLE_HINT } from "@/lib/webmcp/register";
-import { getServerWebMcpStatus, getWebMcpStatus, subscribeWebMcpStatus } from "@/lib/webmcp/status";
+import {
+  getServerWebMcpStatus,
+  getWebMcpStatus,
+  guardedToolsTooltip,
+  subscribeWebMcpStatus,
+} from "@/lib/webmcp/status";
 
 /**
  * Header chip that makes the invisible agent layer visible (docs/05).
  *
- * Green with a tool count once registration succeeds, gray with the enable-flag
- * hint when the browser has no WebMCP. It reads a plain external store rather
- * than context because `<WebMcpTools />` lives in a different subtree.
+ * Green with a tool count once the tools are registered *through WebMCP Guard*,
+ * gray with the enable-flag hint when the browser has no WebMCP at all. It reads
+ * a plain external store rather than context because `<WebMcpTools />` lives in
+ * a different subtree.
  */
 export function WebMcpStatusChip() {
   const status = useSyncExternalStore(
@@ -36,11 +42,8 @@ export function WebMcpStatusChip() {
   }
 
   return (
-    <Chip
-      tone="on"
-      title={`Registered on ${status.surface}.modelContext. Agents in this browser can call these tools.`}
-    >
-      WebMCP: {status.toolCount} {status.toolCount === 1 ? "tool" : "tools"}
+    <Chip tone="on" title={guardedToolsTooltip(status)}>
+      Guarded: {status.toolCount} {status.toolCount === 1 ? "tool" : "tools"}
     </Chip>
   );
 }

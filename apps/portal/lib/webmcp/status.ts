@@ -1,3 +1,4 @@
+import { GUARD_ENDPOINT } from "./guard";
 import type { WebMcpSurface } from "./register";
 
 /**
@@ -54,6 +55,20 @@ export function subscribeWebMcpStatus(listener: () => void): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+/**
+ * Chip tooltip. Says both halves out loud — the tools are registered on a real
+ * WebMCP surface, and every call they make goes through the guard mounted at
+ * `/api/guard` — because that sentence is the product in one line.
+ */
+export function guardedToolsTooltip(status: WebMcpStatus): string {
+  const noun = status.toolCount === 1 ? "tool" : "tools";
+  return (
+    `${status.toolCount} ${noun} guarded via ${GUARD_ENDPOINT}. ` +
+    `Registered on ${status.surface}.modelContext; every agent call is gated, logged and ` +
+    "transformed by WebMCP Guard before the model sees a result."
+  );
 }
 
 /** Test seam: returns the store to its pre-registration state. */

@@ -94,6 +94,7 @@ describe("GateRequestSchema", () => {
 describe("GateResponseSchema", () => {
   it("accepts an allow with detokenized args", () => {
     const parsed = GateResponseSchema.parse({
+      callId: "call_a1",
       verdict: "allow",
       args: { patientId: "MRN-00042" },
       ruleIds: ["P-3"],
@@ -104,6 +105,7 @@ describe("GateResponseSchema", () => {
 
   it("accepts a deny with an agent-legible message", () => {
     const parsed = GateResponseSchema.parse({
+      callId: "call_a2",
       verdict: "deny",
       message: "blocked by policy P-7: destructive actions require justification",
       ruleIds: ["P-7"],
@@ -113,6 +115,7 @@ describe("GateResponseSchema", () => {
 
   it("accepts a require-confirmation with a one-time id", () => {
     const parsed = GateResponseSchema.parse({
+      callId: "call_a3",
       verdict: "require-confirmation",
       message: "A person must approve this deletion.",
       confirmationId: "cnf_abc",
@@ -122,11 +125,17 @@ describe("GateResponseSchema", () => {
   });
 
   it("requires ruleIds so every decision is attributable", () => {
-    expect(GateResponseSchema.safeParse({ verdict: "allow" }).success).toBe(false);
+    expect(GateResponseSchema.safeParse({ callId: "c", verdict: "allow" }).success).toBe(false);
+  });
+
+  it("requires callId so gate and transform correlate into one log entry", () => {
+    expect(GateResponseSchema.safeParse({ verdict: "allow", ruleIds: [] }).success).toBe(false);
   });
 
   it("rejects an unknown verdict", () => {
-    expect(GateResponseSchema.safeParse({ verdict: "maybe", ruleIds: [] }).success).toBe(false);
+    expect(
+      GateResponseSchema.safeParse({ callId: "c", verdict: "maybe", ruleIds: [] }).success,
+    ).toBe(false);
   });
 });
 

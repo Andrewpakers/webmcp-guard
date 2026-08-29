@@ -17,10 +17,16 @@
     "src"
   ],
   "scripts": {
+    "test": "vitest run --root ../.. --project @webmcp-guard/storage-sqlite",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "@types/better-sqlite3": "^9.6.0"
+  },
+  "dependencies": {
+    "@webmcp-guard/shared": "workspace:*",
+    "better-sqlite3": "^13.0.3"
   }
 }
