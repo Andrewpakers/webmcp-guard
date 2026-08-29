@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/**
+ * WebMCP Guard Console — dark security-admin surface.
+ *
+ * Deliberately nothing like the clinical portal (docs/06): slate/indigo,
+ * dense type, monospace for every identifier, and a single accent used only
+ * for interactive affordances so the verdict colours stay meaningful.
+ */
 @theme inline {
   --font-sans:
     ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -7,5 +14,74 @@
 }
 
 html {
-  color-scheme: light dark;
+  color-scheme: dark;
+}
+
+body {
+  /* A faint indigo wash so large empty areas do not read as flat black. */
+  background-image:
+    radial-gradient(60rem 40rem at 12% -10%, rgb(49 46 129 / 0.35), transparent 60%),
+    radial-gradient(50rem 30rem at 100% 0%, rgb(8 51 68 / 0.35), transparent 55%);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+@layer components {
+  .gc-card {
+    @apply rounded-lg border border-slate-800 bg-slate-900/60 shadow-sm backdrop-blur-sm;
+  }
+
+  .gc-label {
+    @apply text-[0.6875rem] font-medium tracking-widest text-slate-400 uppercase;
+  }
+
+  .gc-input {
+    @apply w-full rounded-md border border-slate-700 bg-slate-950/70 px-2.5 py-1.5 text-sm
+      text-slate-100 outline-none placeholder:text-slate-600
+      focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/60;
+  }
+
+  .gc-btn {
+    @apply inline-flex cursor-pointer items-center justify-center gap-1.5 rounded-md border
+      border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-xs font-medium text-slate-200
+      transition-colors hover:border-slate-600 hover:bg-slate-700/80
+      focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none
+      disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .gc-btn-primary {
+    @apply border-indigo-500 bg-indigo-600 text-white hover:border-indigo-400 hover:bg-indigo-500;
+  }
+
+  .gc-btn-danger {
+    @apply border-red-900/70 bg-red-950/60 text-red-300 hover:border-red-700 hover:bg-red-900/60;
+  }
+
+  .gc-badge {
+    @apply inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[0.6875rem]
+      leading-4 whitespace-nowrap;
+  }
+
+  .gc-chip {
+    @apply inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-800/70 px-1.5
+      py-0.5 font-mono text-[0.6875rem] text-slate-300;
+  }
+
+  .gc-json {
+    /* pre-wrap, not pre: long tool results have to stay readable in a narrow
+       drawer column without a horizontal scrollbar per panel. */
+    @apply max-h-72 overflow-auto rounded-md border border-slate-800 bg-slate-950/80 p-3
+      font-mono text-[0.6875rem] leading-relaxed break-words whitespace-pre-wrap text-slate-300;
+  }
+
+  .gc-link {
+    @apply text-indigo-300 underline decoration-indigo-500/40 underline-offset-2
+      hover:text-indigo-200 hover:decoration-indigo-400;
+  }
+}
+
+/* Dense scrollbars that do not fight the dark surface. */
+* {
+  scrollbar-color: rgb(51 65 85) transparent;
+  scrollbar-width: thin;
 }

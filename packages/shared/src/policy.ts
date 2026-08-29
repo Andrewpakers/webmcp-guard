@@ -15,7 +15,10 @@ import { DataClassSchema, TransformActionSchema } from "./data-class";
  * against the `tags` a developer passed to `guard.registerTool`.
  */
 export const ToolMatcherSchema = z.union([
-  z.array(z.string().min(1)),
+  // `.min(1)` matters: an empty list would mean "matches no tool", but the
+  // console's builder round-trips it to an omitted matcher — "matches every
+  // tool". Refusing the empty list keeps those two meanings from colliding.
+  z.array(z.string().min(1)).min(1),
   z.object({ tags: z.array(z.string().min(1)).min(1) }).strict(),
 ]);
 

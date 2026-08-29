@@ -37,6 +37,10 @@ describe("ToolMatcherSchema", () => {
     expect(ToolMatcherSchema.safeParse({ tags: [] }).success).toBe(false);
   });
 
+  it("rejects an empty tool-name list (would round-trip to match-everything)", () => {
+    expect(ToolMatcherSchema.safeParse([]).success).toBe(false);
+  });
+
   it("rejects unknown keys in the tag matcher", () => {
     expect(ToolMatcherSchema.safeParse({ tags: ["a"], names: ["b"] }).success).toBe(false);
   });

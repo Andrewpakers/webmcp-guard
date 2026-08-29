@@ -131,18 +131,28 @@ suite green).
 
 ## Phase 4 — Console (minimum submittable product line)
 
-- [ ] Console shell: token login, layout, nav
-- [ ] Audit log table + filters + auto-refresh + detail drawer with
-      before/after payloads and gated reveal (reveal is logged)
-- [ ] Policy list + structured rule editor + per-class transform matrix +
-      enable/disable + reorder; JSON escape hatch
-- [ ] Dashboard: stat cards, 2 charts, recent activity
-- [ ] CORS + admin-token auth on portal admin routes
-- [ ] Live-edit proof: change a transform in console → next agent call behaves
-      differently, no redeploy
-- [ ] Review gate (Opus reviewer; Fable spot-check on auth/CORS, suite green)
-- [ ] **Commit: `feat(console): logs, policies, dashboard`**
-- [ ] ☑ Checkpoint: from here the project is submittable. Deploy early (see
+- [x] Console shell: token login, layout, nav _(sessionStorage-only token,
+      validated against `/stats` before storing)_
+- [x] Audit log table + filters + auto-refresh + detail drawer with
+      before/after payloads and gated reveal (reveal is logged) _(reveal
+      verified to write a `console_reveal` audit entry)_
+- [x] Policy list + structured rule editor + per-class transform matrix +
+      enable/disable + reorder; JSON escape hatch _(round-trip byte-identical;
+      `ToolMatcherSchema` now rejects empty tool lists so the JSON hatch
+      cannot widen a rule to match-everything)_
+- [x] Dashboard: stat cards, 2 charts, recent activity _(stat card renamed
+      "Sensitive data handled" — storage counts classified calls, not
+      rewritten ones; the per-entry badge checks real before/after diffs)_
+- [x] CORS + admin-token auth on portal admin routes _(exact-origin ACAO
+      verified; disallowed origin gets none)_
+- [x] Live-edit proof: change a transform in console → next agent call behaves
+      differently, no redeploy _(verified twice: rule PUT name→mask, and
+      disable→raw)_
+- [x] Review gate (Opus reviewer; Fable spot-check on auth/CORS, suite green)
+      — REQUEST CHANGES (2 findings: transformed-badge overclaim, `tools: []`
+      widening) → both fixed by orchestrator + tests, suite 880 green
+- [x] **Commit: `feat(console): logs, policies, dashboard`**
+- [x] ☑ Checkpoint: from here the project is submittable. Deploy early (see
       Phase 7 deploy items) rather than waiting.
 
 ## Phase 5 — Posture, confirmation, justification
@@ -270,3 +280,17 @@ what's next, deviations/decisions._
   unmatched. Phase 4 console was built in parallel (sibling package, no
   conflicts) and verified live against the real API. Next: Phase 4 gate +
   commit, then Phase 5.
+- 2026-08-29 — Phase 4 complete (console). Opus review gate REQUESTED
+  CHANGES with two genuine findings, both fixed by the orchestrator with
+  regression tests: (1) the log "transformed" badge and dashboard card
+  claimed transformation when the classifier had merely *found* classes —
+  badge now requires a real before/after payload difference, card renamed
+  "Sensitive data handled" (storage's `stats.transformed` counts classified
+  calls; renaming was truthful and cheaper than changing both adapters);
+  (2) `ToolMatcherSchema` accepted `tools: []`, which the builder
+  round-tripped into match-everything — now rejected at the schema.
+  Trivia also fixed: app id shown in Settings About (read off the newest
+  log entry), stale comment, dead tagline. Reviewer verified live: CORS
+  exact-origin, 401 handling, masked-then-audited reveal, byte-identical
+  policy round-trip, live-edit with no redeploy. 880 tests green.
+  SUBMITTABLE CHECKPOINT reached. Next: Phase 5.
