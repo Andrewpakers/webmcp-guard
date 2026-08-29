@@ -12,6 +12,6 @@ describe("portal site identity", () => {
   });
 
   it("always carries a synthetic-data notice", () => {
-    expect(SITE.demoNotice).toMatch(/fictitious/i);
+    expect(SITE.demoNotice).toMatch(/synthetic/i);
   });
 });

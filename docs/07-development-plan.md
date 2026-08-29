@@ -42,19 +42,27 @@ suite green).
 
 ## Phase 1 — Portal with raw WebMCP (the "before" picture)
 
-- [ ] Portal SQLite schema + deterministic faker seed (~60 patients, notes with
+- [x] Portal SQLite schema + deterministic faker seed (~60 patients, notes with
       embedded PHI, appointments); idempotent seed-on-boot
-- [ ] Human UI: patient list w/ search, patient detail, edit, add note, export
+- [x] Human UI: patient list w/ search, patient detail, edit, add note, export
       CSV, delete w/ confirm ("Demo environment" banner everywhere)
-- [ ] Register all 7 tools from `05-demo-app-requirements.md` directly via
+- [x] Register all 7 tools from `05-demo-app-requirements.md` directly via
       `document.modelContext.registerTool` (no WebMCP Guard yet), with
-      feature-detection fallback + header status chip
-- [ ] Verify in Chrome (flag enabled) with the Model Context Tool Inspector:
-      every tool callable, results correct
-- [ ] Capture screenshots/notes of the unprotected behavior (raw SSNs in
+      feature-detection fallback + header status chip _(the "Agent Activity"
+      drawer from docs/05 is deferred to Phase 2, where it has live guard events
+      to show)_
+- [x] Verify in Chrome (flag enabled) with the Model Context Tool Inspector:
+      every tool callable, results correct _(done via headless snap Chromium
+      151 + `--enable-features=WebMCP` driven over CDP by
+      `scripts/webmcp-e2e.mjs` — no Inspector extension available headless,
+      but all 7 tools were listed and executed for real through
+      `modelContext.executeTool`; final Inspector/ChatGPT pass still due in
+      Phase 7 against the live URL)_
+- [x] Capture screenshots/notes of the unprotected behavior (raw SSNs in
       results, silent delete) for the video's "before" segment
-- [ ] Review gate (Opus reviewer, suite green)
-- [ ] **Commit: `feat(portal): Lakeside Medical with raw WebMCP tools`**
+      _(docs/captures/phase1-before/)_
+- [x] Review gate (Opus reviewer, suite green) — APPROVED
+- [x] **Commit: `feat(portal): Lakeside Medical with raw WebMCP tools`**
 
 ## Phase 2 — SDK core: wrap, gate, log
 
@@ -182,3 +190,18 @@ what's next, deviations/decisions._
   general-purpose agents with model override since `.claude/agents/`
   definitions only register at session start. Next: Phase 1 (portal +
   raw WebMCP).
+- 2026-08-29 — Phase 1 complete (portal + raw WebMCP). 16 test files / 195
+  tests green; Opus review APPROVED. **WebMCP discrepancy vs docs/08 (trust
+  the browser):** Chromium 151 invokes `execute(input)` with NO second
+  options argument, despite `webmcp-types` declaring `(input, {signal})` —
+  all 7 tools were crashing on destructure; fixed with `ctx?.signal`.
+  **Local e2e verification unlocked:** snap Chromium 151 exposes
+  `document.modelContext` under `--enable-features=WebMCP`;
+  `scripts/webmcp-e2e.mjs` (CDP harness, orchestrator-authored) lists/calls
+  tools and screenshots pages headlessly. All 7 tools verified callable
+  end-to-end; before-captures in docs/captures/phase1-before/ (raw SSNs in
+  search/get/export output, silent delete of LM-100060, UI screenshots).
+  Reviewer polish notes carried forward: dead `SITE.tagline`, faker-bump
+  fragility of the determinism test (address before Phase 3), untested
+  status store, Render `$PORT` + Next ESLint plugin (Phase 7). Next:
+  Phase 2 (SDK core).

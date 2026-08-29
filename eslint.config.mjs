@@ -1,4 +1,5 @@
 import js from "@eslint/js";
+import globals from "globals";
 import tseslint from "typescript-eslint";
 import prettier from "eslint-config-prettier";
 
@@ -39,6 +40,12 @@ export default tseslint.config(
         { prefer: "type-imports", fixStyle: "inline-type-imports" },
       ],
     },
+  },
+  // Dev/ops scripts run under plain Node.
+  {
+    files: ["scripts/**/*.mjs"],
+    languageOptions: { globals: { ...globals.node } },
+    rules: { "no-empty": ["error", { allowEmptyCatch: true }] },
   },
   prettier,
 );

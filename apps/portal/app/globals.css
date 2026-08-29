@@ -6,6 +6,7 @@
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* Clinical software is light-mode software; the palette is fixed either way. */
 html {
-  color-scheme: light dark;
+  color-scheme: light;
 }
