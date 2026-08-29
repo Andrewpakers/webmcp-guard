@@ -13,6 +13,7 @@ import { DEFAULT_POLICY_RULES, seedDefaultPolicy } from "./seed";
 const SEEDED_IDS = [
   "posture-deny-unknown-agent",
   "posture-deny-old-browser",
+  "role-billing-notes-masked",
   "phi-transform-default",
   "export-requires-justification",
   "destructive-requires-confirmation",
@@ -43,6 +44,7 @@ describe("DEFAULT_POLICY_RULES", () => {
     expect(enabled).toEqual({
       "posture-deny-unknown-agent": false,
       "posture-deny-old-browser": false,
+      "role-billing-notes-masked": true,
       "phi-transform-default": true,
       "export-requires-justification": true,
       "destructive-requires-confirmation": true,
@@ -87,6 +89,63 @@ describe("DEFAULT_POLICY_RULES", () => {
       credit_card: "passthrough",
       free_text_phi: "passthrough",
     });
+  });
+
+  it("hides clinical notes from billing, ahead of the default transform", () => {
+    const billing = ruleById("role-billing-notes-masked");
+    const phi = ruleById("phi-transform-default");
+
+    expect(billing.enabled).toBe(true);
+    expect(billing.match).toEqual({ roles: ["billing"], tools: ["get_patient"] });
+    // Ahead of the default matrix, because the transform aspect takes exactly
+    // one rule's matrix — first match wins, there is no merging.
+    expect(billing.priority ?? 0).toBeLessThan(phi.priority ?? 0);
+
+    if (billing.action.type !== "transform") throw new Error("expected a transform rule");
+    if (phi.action.type !== "transform") throw new Error("expected a transform rule");
+
+    // Which is why the rule carries the whole policy for a billing session:
+    // identical to the default matrix, except for the one row it exists to
+    // change. `free_text_phi: "mask"` is the whole-field switch (transform.ts),
+    // so note bodies come back as ▪▪▪ rather than span-by-span.
+    expect(billing.action.perClass).toEqual({
+      ...phi.action.perClass,
+      free_text_phi: "mask",
+    });
+    expect(phi.action.perClass.free_text_phi).toBe("passthrough");
+  });
+
+  it("resolves the billing matrix for billing and the default matrix for everyone else", async () => {
+    const storage = memoryStorage();
+    await seedDefaultPolicy(storage);
+    const policy = await storage.getPolicy();
+
+    const call = { app: "lakeside-portal", tool: "get_patient", toolTags: ["read", "phi"] };
+
+    const billing = resolvePolicy(policy, { ...call, role: "billing" });
+    expect(billing.transformRule?.id).toBe("role-billing-notes-masked");
+    expect(billing.perClass?.free_text_phi).toBe("mask");
+    // Demographics are untouched by the role rule: same tokens as everyone.
+    expect(billing.perClass?.name).toBe("tokenize");
+    expect(billing.perClass?.dob).toBe("contextualize");
+
+    for (const role of ["physician", "nursing", undefined]) {
+      const other = resolvePolicy(policy, {
+        ...call,
+        ...(role === undefined ? {} : { role }),
+      });
+      expect(other.transformRule?.id).toBe("phi-transform-default");
+      expect(other.perClass?.free_text_phi).toBe("passthrough");
+    }
+
+    // And it is scoped to get_patient: billing still gets normal search results.
+    const search = resolvePolicy(policy, {
+      app: "lakeside-portal",
+      tool: "search_patients",
+      toolTags: ["read", "phi"],
+      role: "billing",
+    });
+    expect(search.transformRule?.id).toBe("phi-transform-default");
   });
 
   it("requires 40 characters of justification for exports", () => {

@@ -110,8 +110,12 @@ describe("getGuardServer", () => {
     resetGuardServer();
     getGuardServer();
 
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(String(warn.mock.calls[0][0])).toContain("insecure development defaults");
+    // Two one-time warnings on the first build, none on the rebuild: the
+    // guard's own secrets, and the portal's mock-session signing key (Phase 6).
+    const messages = warn.mock.calls.map((call) => String(call[0]));
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toContain("insecure development defaults");
+    expect(messages[1]).toContain("development key");
   });
 
   it("stays quiet when the environment is configured", () => {

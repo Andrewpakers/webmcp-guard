@@ -1,12 +1,16 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import Link from "next/link";
 import type { ReactNode } from "react";
 
 import { AgentActivityDrawer } from "@/components/agent-activity-drawer";
 import { LakesideWordmark } from "@/components/lakeside-logo";
+import { PersonaSwitcher } from "@/components/persona-switcher";
 import { SidebarNav } from "@/components/sidebar-nav";
 import { WebMcpStatusChip } from "@/components/webmcp-status-chip";
 import { WebMcpTools } from "@/components/webmcp-tools";
+import { SESSION_BOOTSTRAP_ATTRIBUTES } from "@/lib/session/browser";
+import { PORTAL_SESSION_COOKIE, personaFromSignedCookie } from "@/lib/session/cookie";
 import { SITE } from "@/lib/site";
 
 import "./globals.css";
@@ -23,11 +27,26 @@ export const metadata: Metadata = {
  *
  * `<WebMcpTools />` sits here so the seven guarded tools are registered on every
  * route — an agent should not have to navigate anywhere before it can search.
+ *
+ * Reading the session cookie here makes every route dynamic, which the portal
+ * already is: every page renders live rows out of SQLite. The persona it
+ * resolves is both rendered (the header switcher) and stamped on `<body>` as the
+ * bootstrap the SDK's `getSessionContext` falls back to on a first visit with no
+ * cookie yet (`lib/session/browser.ts`).
  */
-export default function RootLayout({ children }: { children: ReactNode }) {
+export default async function RootLayout({ children }: { children: ReactNode }) {
+  const cookieStore = await cookies();
+  const { persona } = personaFromSignedCookie(cookieStore.get(PORTAL_SESSION_COOKIE)?.value);
+
   return (
     <html lang="en">
-      <body className="min-h-screen bg-slate-50 font-sans text-slate-900 antialiased">
+      <body
+        className="min-h-screen bg-slate-50 font-sans text-slate-900 antialiased"
+        {...{
+          [SESSION_BOOTSTRAP_ATTRIBUTES.userId]: persona.id,
+          [SESSION_BOOTSTRAP_ATTRIBUTES.role]: persona.role,
+        }}
+      >
         <WebMcpTools />
         <div className="flex min-h-screen">
           <aside className="hidden w-60 shrink-0 flex-col border-r border-slate-200 bg-white px-4 py-5 md:flex">
@@ -47,9 +66,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               <div className="flex items-center gap-3 md:hidden">
                 <LakesideWordmark />
               </div>
-              <div className="hidden text-sm text-slate-500 md:block">
-                Signed in as <span className="font-medium text-slate-700">Dr. Alicia Reyes</span> ·
-                Internal Medicine
+              <div className="hidden md:block">
+                <PersonaSwitcher activeId={persona.id} />
               </div>
               <div className="flex items-center gap-3">
                 <WebMcpStatusChip />

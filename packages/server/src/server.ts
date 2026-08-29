@@ -14,6 +14,7 @@ import {
   RevealRequestSchema,
   RuleActionSchema,
   RuleMatchSchema,
+  SessionContextSchema,
   TransformRequestSchema,
   TransformResponseSchema,
   type ConfirmationEntry,
@@ -27,6 +28,7 @@ import {
   type LogRecord,
   type PerClassTransform,
   type Rule,
+  type SessionContext,
   type StatsRange,
 } from "@webmcp-guard/shared";
 import { z } from "zod";
@@ -206,6 +208,34 @@ export interface GuardServerConfig {
    * must never be able to block every export in the building.
    */
   evaluator?: JustificationEvaluator;
+  /**
+   * Resolves the **verified** identity behind a `/gate` request, from whatever
+   * the host application already uses to authenticate people — a signed session
+   * cookie, a header, a session store (`docs/07` Phase 6; the portal's
+   * implementation is `apps/portal/lib/guard/server.ts`).
+   *
+   * Why this exists at all: `GateRequest.sessionContext` is filled in by the
+   * page, through the SDK's `getSessionContext` (`docs/04`). That is a *claim*.
+   * It is worth exactly what the page is worth, and the page is not a boundary
+   * against the person at the keyboard (`docs/03` threat model) — so a
+   * role-scoped policy that trusted it could be re-roled by anyone who can open
+   * devtools. When a resolver is configured, its answer is what the policy
+   * engine matches on and what the audit log records.
+   *
+   * Three outcomes, all deliberate:
+   *
+   * | resolver | session used | why |
+   * |---|---|---|
+   * | returns a context | that context | verified beats claimed, always |
+   * | returns `undefined` | the client's claim | an answer: "this host has no session of its own here" |
+   * | throws, or answers with a non-session | **no session at all** | a failure is not permission to believe the page instead |
+   *
+   * A disagreement between the claim and the resolved identity is recorded on
+   * the audit entry rather than being silently dropped.
+   */
+  resolveSession?: (
+    request: Request,
+  ) => SessionContext | undefined | Promise<SessionContext | undefined>;
 }
 
 /** The four Next.js App Router verbs, plus the preflight handler. */
@@ -418,6 +448,86 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
     return DEFAULT_JUSTIFICATION_MIN_CHARS;
   }
 
+  // ---- session resolution --------------------------------------------------
+
+  /** `userId=… role=…`, or a plain phrase when there is nothing to name. */
+  function describeSession(session: SessionContext | undefined): string {
+    if (session === undefined) return "no identity";
+    const parts: string[] = [];
+    if (session.userId !== undefined) parts.push(`userId=${truncate(session.userId, 64)}`);
+    if (session.role !== undefined) parts.push(`role=${truncate(session.role, 64)}`);
+    return parts.length > 0 ? parts.join(" ") : "no identity";
+  }
+
+  function sameSession(a: SessionContext | undefined, b: SessionContext | undefined): boolean {
+    return a?.userId === b?.userId && a?.role === b?.role;
+  }
+
+  /** What the guard decided to believe about who is calling, and why. */
+  interface SessionResolution {
+    /** The identity policy matches on and the audit entry records. */
+    session: SessionContext | undefined;
+    /** Audit-only sentence, written when claim and resolver disagree. */
+    note?: string;
+  }
+
+  /**
+   * Asks the host app who is calling, and decides what to believe.
+   *
+   * See {@link GuardServerConfig.resolveSession} for the contract. The one rule
+   * worth restating here: with a resolver configured, a client claim never
+   * *overrides* a server answer — it only fills a gap the host said it could not
+   * fill.
+   */
+  async function resolveSessionFor(
+    request: Request,
+    claimed: SessionContext | undefined,
+  ): Promise<SessionResolution> {
+    if (config.resolveSession === undefined) return { session: claimed };
+
+    let answer: unknown;
+    try {
+      answer = await config.resolveSession(request);
+    } catch (error) {
+      console.warn("[webmcp-guard] resolveSession threw; recording no identity", error);
+      return {
+        session: undefined,
+        note:
+          "The host application's session resolver failed for this call, so no identity was " +
+          `recorded. The page's claim (${describeSession(claimed)}) was not used in its place.`,
+      };
+    }
+
+    // An explicit "I don't know" hands the question back to the page.
+    if (answer === undefined) return { session: claimed };
+
+    // Host code, but still parsed: a stray field would make the audit entry
+    // fail `LogRecordSchema` at the end of the request, long after the mistake.
+    const parsed = SessionContextSchema.safeParse(answer);
+    if (!parsed.success) {
+      console.warn(
+        "[webmcp-guard] resolveSession returned something that is not a session context",
+      );
+      return {
+        session: undefined,
+        note:
+          "The host application's session resolver answered with something that is not a session " +
+          `context, so no identity was recorded. The page's claim (${describeSession(claimed)}) ` +
+          "was not used in its place.",
+      };
+    }
+
+    const resolved = parsed.data;
+    if (claimed === undefined || sameSession(claimed, resolved)) return { session: resolved };
+
+    return {
+      session: resolved,
+      note:
+        `The page claimed ${describeSession(claimed)}; the host application resolved ` +
+        `${describeSession(resolved)}. The resolved identity decided this call.`,
+    };
+  }
+
   // ---- agent-facing routes -------------------------------------------------
 
   /**
@@ -524,6 +634,7 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
   async function justificationOutcome(
     gate: GateRequest,
     decision: PolicyDecision,
+    session: SessionContext | undefined,
   ): Promise<GateOutcome> {
     const rule = decision.gateRule;
     const minChars = justificationMinChars(rule);
@@ -550,7 +661,8 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
         app: gate.app,
         minChars,
         ...(rule !== null ? { ruleId: rule.id } : {}),
-        ...(gate.sessionContext !== undefined ? { session: gate.sessionContext } : {}),
+        // The evaluator is told the *verified* identity, not the page's claim.
+        ...(session !== undefined ? { session } : {}),
       },
     });
 
@@ -585,12 +697,20 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
     if (!parsed.ok) return parsed.response;
     const gate = parsed.value;
 
+    /**
+     * Who is calling, decided **before** policy is resolved: a role-scoped rule
+     * must match on an identity the server established, never on the one the
+     * page asked for. With no `resolveSession` configured this is the page's
+     * claim, exactly as it was in Phase 5.
+     */
+    const { session, note: sessionNote } = await resolveSessionFor(request, gate.sessionContext);
+
     const policy = await storage.getPolicy();
     const decision = resolvePolicy(policy, {
       app: gate.app,
       tool: gate.tool,
       toolTags: gate.toolTags,
-      role: gate.sessionContext?.role,
+      role: session?.role,
       // Advisory environment signals; the engine decides what they are worth.
       posture: gate.posture,
     });
@@ -620,7 +740,7 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
     if (decision.verdict === "require-confirmation") {
       outcome = await confirmationOutcome(gate, decision, callId, presented);
     } else if (decision.verdict === "require-justification") {
-      outcome = await justificationOutcome(gate, decision);
+      outcome = await justificationOutcome(gate, decision, session);
     } else {
       const message = verdictMessage(decision, gate.tool);
       outcome = {
@@ -675,7 +795,7 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
       inboundClasses = classify(executableArgs, await classifierOptions()).classes;
     }
 
-    const auditMessage = [outcome.message, outcome.auditNote, detokenizeNote]
+    const auditMessage = [outcome.message, outcome.auditNote, detokenizeNote, sessionNote]
       .filter((part): part is string => part !== undefined && part.length > 0)
       .join(" ");
 
@@ -687,7 +807,8 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
         tool: gate.tool,
         verdict: outcome.verdict,
         agent: agentInfoFromPosture(gate.posture),
-        session: gate.sessionContext,
+        // The identity the guard actually acted on, not the one it was told.
+        session,
         dataClasses: inboundClasses,
         ruleIds: decision.ruleIds,
         durationMs: 0,
@@ -760,6 +881,15 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
             .map((tag) => tag.trim())
             .filter((tag) => tag.length > 0);
 
+    /**
+     * The session **is** resolved here, so a role-scoped `require-justification`
+     * or `require-confirmation` rule shapes the tool's schema for the role the
+     * host says is signed in — and a persona switch propagates on the SDK's next
+     * refresh. There is no claim to compare against on this route (a GET carries
+     * no `sessionContext`), so nothing is recorded either way.
+     */
+    const { session } = await resolveSessionFor(request, undefined);
+
     const policy = await storage.getPolicy();
     // No posture on this path: registration happens before any call, and a
     // posture rule that would deny the *call* has no bearing on the *schema*.
@@ -767,6 +897,7 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
       app,
       tool,
       ...(toolTags !== undefined && toolTags.length > 0 ? { toolTags } : {}),
+      ...(session?.role !== undefined ? { role: session.role } : {}),
     });
 
     const requiresJustification = decision.verdict === "require-justification";

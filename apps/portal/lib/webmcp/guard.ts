@@ -1,5 +1,6 @@
 import { createGuard, type Guard } from "@webmcp-guard/sdk";
 
+import { readBrowserSessionContext } from "@/lib/session/browser";
 import { SITE } from "@/lib/site";
 
 /**
@@ -22,7 +23,22 @@ export const GUARD_APP = SITE.id;
 let guard: Guard | null = null;
 
 export function getGuard(): Guard {
-  guard ??= createGuard({ endpoint: GUARD_ENDPOINT, app: GUARD_APP });
+  guard ??= createGuard({
+    endpoint: GUARD_ENDPOINT,
+    app: GUARD_APP,
+    /**
+     * The host app's identity hook (`docs/04`). Read fresh on every tool call,
+     * so switching persona in the header takes effect on the next call with no
+     * re-registration.
+     *
+     * It is a *claim*: the page can say anything, and the guard server does not
+     * take its word for it. `apps/portal/lib/guard/server.ts` re-derives the
+     * session from the signed httpOnly cookie and that is what policy and the
+     * audit log use — this value only ever gets to disagree, which the audit
+     * entry then records.
+     */
+    getSessionContext: () => readBrowserSessionContext(),
+  });
   return guard;
 }
 

@@ -13,7 +13,8 @@ import {
  * rules, so an administrator who deletes a default rule keeps it deleted.
  *
  * Enabled: the PHI transform (1), the export justification (2) and the
- * destructive confirmation (3) — Phase 5 makes all three real.
+ * destructive confirmation (3) — Phase 5 makes all three real — plus the Phase 6
+ * role rule that hides clinical notes from the billing desk.
  *
  * Disabled: the **posture pack** (4). `docs/05` is explicit that it ships off
  * "so judges' environments aren't blocked", and it is toggled on live in the
@@ -73,6 +74,49 @@ export const DEFAULT_POLICY_RULES: RuleDraft[] = [
         "This browser is older than Chrome 149, which is the minimum this organization allows " +
         "for agent tool calls. Ask the person using this page to update their browser and try " +
         "again, or to perform the action in the portal themselves.",
+    },
+  },
+  {
+    /**
+     * Role-scoped data control (`docs/07` Phase 6): the billing desk can look a
+     * patient up, but has no business reading what the clinician wrote.
+     *
+     * Sits at priority 8, **ahead of** `phi-transform-default` (10), because the
+     * transform aspect takes exactly one rule's matrix — first match wins, and
+     * there is no merging of matrices anywhere in the engine. So this rule has
+     * to carry the *whole* policy for a billing session, not a delta: every row
+     * below is a verbatim copy of `phi-transform-default` except
+     * `free_text_phi`, which goes from `passthrough` to `mask`.
+     *
+     * `free_text_phi: "mask"` is the whole-field switch described in
+     * `transform.ts`: any other value than `passthrough` stops per-span
+     * replacement and replaces the *entire* free-text value instead. A note body
+     * therefore comes back as `▪▪▪` for billing, while demographics keep the
+     * same tokenization every other role gets.
+     *
+     * Scoped to `get_patient` only, which is the one tool that returns note
+     * bodies. Widening it to the `phi` tag would also blank `search_patients`
+     * summaries, which billing legitimately needs.
+     */
+    id: "role-billing-notes-masked",
+    name: "Billing sees no clinical notes",
+    enabled: true,
+    priority: 8,
+    match: { roles: ["billing"], tools: ["get_patient"] },
+    action: {
+      type: "transform",
+      perClass: PerClassTransformSchema.parse({
+        ssn: "tokenize",
+        mrn: "tokenize",
+        name: "tokenize",
+        insurance_id: "tokenize",
+        dob: "contextualize",
+        address: "contextualize",
+        email: "mask",
+        // The only line that differs from phi-transform-default.
+        free_text_phi: "mask",
+        // phone and credit_card fall back to passthrough, as they do there.
+      }),
     },
   },
   {

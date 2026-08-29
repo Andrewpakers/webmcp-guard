@@ -34,6 +34,8 @@ interface SendOptions {
   token?: string;
   query?: Record<string, string>;
   origin?: string;
+  /** Extra request headers — a cookie, for the session-resolver tests. */
+  headers?: Record<string, string>;
 }
 
 function buildUrl(path: string, query: Record<string, string> = {}): string {
@@ -48,7 +50,7 @@ async function send(
   path: string,
   options: SendOptions = {},
 ): Promise<Response> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...options.headers };
   if (options.token !== undefined) headers.authorization = `Bearer ${options.token}`;
   if (options.origin !== undefined) headers.origin = options.origin;
 
@@ -424,6 +426,244 @@ describe("POST /gate", () => {
     const response = await send(guard, "GET", "gate");
     expect(response.status).toBe(405);
     expect(response.headers.get("allow")).toBe("POST");
+  });
+});
+
+/**
+ * `GuardServerConfig.resolveSession` — the honest half of role-scoped policy
+ * (`docs/07` Phase 6).
+ *
+ * `GateRequest.sessionContext` is a claim the page makes. These tests hold the
+ * gate to the rule that makes role rules worth having: when the host app can
+ * answer "who is this", its answer is what policy matches and what the log
+ * records, and the page's claim never overrides it.
+ */
+describe("POST /gate — server-resolved session", () => {
+  /** A rule that only fires for billing, so the resolved role is observable. */
+  async function seedBillingRule(): Promise<void> {
+    await storage.createRule({
+      id: "billing-no-export",
+      name: "Billing cannot export",
+      priority: 5,
+      match: { roles: ["billing"], tools: ["export_patients"] },
+      action: { type: "deny", message: "Billing staff cannot export patient records." },
+    });
+    // The seeded justification rule also matches export_patients; disabling it
+    // keeps the verdict a clean read of the role matcher.
+    await storage.updateRule("export-requires-justification", { enabled: false });
+  }
+
+  const exportPayload = (overrides: Record<string, unknown> = {}) =>
+    gatePayload({ tool: "export_patients", args: {}, toolTags: ["read"], ...overrides });
+
+  function withResolver(resolveSession: GuardServerConfig["resolveSession"]): GuardServer {
+    return createGuardServer(config(storage, { resolveSession }));
+  }
+
+  it("uses the resolver's answer for policy, over a spoofed client claim", async () => {
+    await seedBillingRule();
+    const resolved = withResolver(() => ({ userId: "sam-levin", role: "billing" }));
+
+    const gate = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", {
+        // The page claims to be a physician. It is holding billing's cookie.
+        payload: exportPayload({ sessionContext: { userId: "dr-reyes", role: "physician" } }),
+      }),
+    );
+
+    expect(gate.verdict).toBe("deny");
+    expect(gate.ruleIds).toEqual(["billing-no-export"]);
+  });
+
+  it("records the resolved identity — not the claim — on the audit entry", async () => {
+    const resolved = withResolver(() => ({ userId: "sam-levin", role: "billing" }));
+
+    const gate = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", {
+        payload: gatePayload({ sessionContext: { userId: "dr-reyes", role: "physician" } }),
+      }),
+    );
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry?.session).toEqual({ userId: "sam-levin", role: "billing" });
+    // The disagreement is written down rather than quietly discarded.
+    expect(entry?.message).toContain("The page claimed userId=dr-reyes role=physician");
+    expect(entry?.message).toContain("resolved userId=sam-levin role=billing");
+    expect(entry?.message).toContain("The resolved identity decided this call");
+  });
+
+  it("says nothing about a claim that agrees with the resolver", async () => {
+    const resolved = withResolver(() => ({ userId: "sam-levin", role: "billing" }));
+
+    const gate = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", {
+        payload: gatePayload({ sessionContext: { userId: "sam-levin", role: "billing" } }),
+      }),
+    );
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry?.session).toEqual({ userId: "sam-levin", role: "billing" });
+    expect(entry?.message).toBeUndefined();
+  });
+
+  it("reads the request, so a host can resolve from a cookie or a header", async () => {
+    await seedBillingRule();
+    const resolved = withResolver((request) =>
+      request.headers.get("cookie")?.includes("role=billing") === true
+        ? { userId: "sam-levin", role: "billing" }
+        : { userId: "dr-reyes", role: "physician" },
+    );
+
+    const denied = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", {
+        payload: exportPayload(),
+        headers: { cookie: "role=billing" },
+      }),
+    );
+    expect(denied.verdict).toBe("deny");
+
+    const allowed = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", { payload: exportPayload() }),
+    );
+    expect(allowed.verdict).toBe("allow");
+  });
+
+  it("awaits an async resolver", async () => {
+    const resolved = withResolver(async () =>
+      Promise.resolve({ userId: "nurse-okafor", role: "nursing" }),
+    );
+
+    const gate = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", { payload: gatePayload() }),
+    );
+    expect((await storage.getLog(gate.callId))?.session).toEqual({
+      userId: "nurse-okafor",
+      role: "nursing",
+    });
+  });
+
+  it("keeps the client's claim when the resolver declines to answer", async () => {
+    await seedBillingRule();
+    const resolved = withResolver(() => undefined);
+
+    const gate = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", {
+        payload: exportPayload({ sessionContext: { userId: "u-3", role: "billing" } }),
+      }),
+    );
+
+    // `undefined` is an answer: "this host has no session of its own here".
+    expect(gate.verdict).toBe("deny");
+    expect((await storage.getLog(gate.callId))?.session).toEqual({
+      userId: "u-3",
+      role: "billing",
+    });
+  });
+
+  it("records no identity at all when the resolver throws", async () => {
+    await seedBillingRule();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const resolved = withResolver(() => {
+      throw new Error("session store is down");
+    });
+
+    const gate = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", {
+        payload: exportPayload({ sessionContext: { userId: "u-3", role: "billing" } }),
+      }),
+    );
+
+    // A resolver failure is not permission to believe the page instead, so the
+    // role-scoped deny does not fire off the claimed role.
+    expect(gate.verdict).toBe("allow");
+    const entry = await storage.getLog(gate.callId);
+    expect(entry?.session).toBeUndefined();
+    expect(entry?.message).toContain("session resolver failed");
+    expect(entry?.message).toContain("was not used in its place");
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it("records no identity when the resolver answers with something else", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const resolved = withResolver(() => "sam-levin" as unknown as { userId: string; role: string });
+
+    const gate = await payloadOf<GateResponse>(
+      await send(resolved, "POST", "gate", {
+        payload: gatePayload({ sessionContext: { userId: "u-3", role: "billing" } }),
+      }),
+    );
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry?.session).toBeUndefined();
+    expect(entry?.message).toContain("not a session context");
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it("leaves the Phase 5 behaviour alone when no resolver is configured", async () => {
+    await seedBillingRule();
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", {
+        payload: exportPayload({ sessionContext: { userId: "u-3", role: "billing" } }),
+      }),
+    );
+
+    expect(gate.verdict).toBe("deny");
+    expect((await storage.getLog(gate.callId))?.session).toEqual({
+      userId: "u-3",
+      role: "billing",
+    });
+  });
+
+  it("shapes GET /policies/effective for the resolved role", async () => {
+    await storage.createRule({
+      id: "billing-must-justify",
+      name: "Billing must justify a chart read",
+      priority: 5,
+      match: { roles: ["billing"], tools: ["get_patient"] },
+      action: { type: "require-justification", minChars: 25 },
+    });
+
+    const billing = withResolver(() => ({ userId: "sam-levin", role: "billing" }));
+    const clinician = withResolver(() => ({ userId: "dr-reyes", role: "physician" }));
+    const query = { app: APP, tool: "get_patient", tags: "read,phi" };
+
+    expect(
+      await payloadOf<{ requiresJustification: boolean; minChars: number | null }>(
+        await send(billing, "GET", "policies/effective", { query }),
+      ),
+    ).toMatchObject({ requiresJustification: true, minChars: 25 });
+
+    expect(
+      await payloadOf<{ requiresJustification: boolean }>(
+        await send(clinician, "GET", "policies/effective", { query }),
+      ),
+    ).toMatchObject({ requiresJustification: false });
+  });
+
+  it("hands the resolved session to the justification evaluator", async () => {
+    const seen: unknown[] = [];
+    const resolved = createGuardServer(
+      config(storage, {
+        resolveSession: () => ({ userId: "sam-levin", role: "billing" }),
+        evaluator: {
+          evaluate: (input) => {
+            seen.push(input.context.session);
+            return { verdict: "pass" as const, reason: "fine" };
+          },
+        },
+      }),
+    );
+
+    await send(resolved, "POST", "gate", {
+      payload: gatePayload({
+        tool: "export_patients",
+        args: { justification: "Quarterly billing reconciliation for the finance team audit." },
+        toolTags: ["read", "phi", "bulk"],
+        sessionContext: { userId: "dr-reyes", role: "physician" },
+      }),
+    });
+
+    expect(seen).toEqual([{ userId: "sam-levin", role: "billing" }]);
   });
 });
 

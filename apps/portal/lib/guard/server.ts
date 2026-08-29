@@ -3,6 +3,11 @@ import { sqliteStorage } from "@webmcp-guard/storage-sqlite";
 import type BetterSqlite3 from "better-sqlite3";
 
 import { getDb } from "@/lib/db/connection";
+import {
+  portalSessionContext,
+  portalSessionSecretWarning,
+  resolvePortalSessionSecret,
+} from "@/lib/session/cookie";
 
 /**
  * The WebMCP Guard server, mounted **inside** the portal
@@ -120,10 +125,12 @@ interface GuardGlobal {
 }
 
 let hasWarnedInsecure = false;
+let hasWarnedSessionSecret = false;
 
 /** Test seam: lets a test observe the once-only warning more than once. */
 export function resetGuardServerWarning(): void {
   hasWarnedInsecure = false;
+  hasWarnedSessionSecret = false;
 }
 
 /**
@@ -143,6 +150,10 @@ export function getGuardServer(): GuardServer {
     hasWarnedInsecure = true;
     console.warn(insecureDefaultsWarning(secrets.fellBack));
   }
+  if (resolvePortalSessionSecret().fellBack && !hasWarnedSessionSecret) {
+    hasWarnedSessionSecret = true;
+    console.warn(portalSessionSecretWarning());
+  }
 
   const server = createGuardServer({
     // Adoption mode: the guard's tables live alongside the portal's own rather
@@ -154,6 +165,24 @@ export function getGuardServer(): GuardServer {
     adminToken: secrets.adminToken,
     // The host app teaches the classifier who its people are (docs/04).
     nameDictionary: () => patientNameDictionary(database),
+    /**
+     * Identity is resolved **here**, from the portal's own signed cookie, not
+     * from whatever the page put on the gate request (`docs/07` Phase 6).
+     *
+     * The page's `getSessionContext` claim still travels — the SDK's documented
+     * API is genuinely wired (`lib/webmcp/guard.ts`) — but this is the value the
+     * policy engine matches `match.roles` against and the value the audit entry
+     * records. A page script that claims `role: "physician"` while holding
+     * Sam Levin's cookie gets billing policy, and the disagreement is written
+     * into the log entry's message.
+     *
+     * Never returns `undefined`: an absent or unverifiable cookie resolves to
+     * the default persona (Dr. Reyes), because the portal has no login wall and
+     * "not signed in" has to mean "signed in as the default clinician". That
+     * also means the client's claim is *never* the thing this deployment acts
+     * on, which is the point.
+     */
+    resolveSession: (request) => portalSessionContext(request),
     ...(secrets.consoleOrigin !== undefined ? { consoleOrigin: secrets.consoleOrigin } : {}),
   });
 

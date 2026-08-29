@@ -187,9 +187,21 @@ suite green).
 
 ## Phase 6 — Roles (optional; cut first if behind)
 
-- [ ] Mock login (3 personas, signed session cookie w/ role)
-- [ ] `getSessionContext` wired through gate; `roles` matcher in policy engine
-- [ ] One seeded role rule (billing: `get_patient` clinical notes masked)
+- [x] Mock login (3 personas, signed session cookie w/ role) _(header
+      persona-switcher instead of a `/login` page — one obvious click for the
+      video; `POST /api/session` signs `base64url(userId.role.issuedAt)` +
+      HMAC-SHA256, httpOnly + SameSite=Lax, no expiry by design; key derived
+      from `PORTAL_SESSION_SECRET` → `GUARD_ORG_SECRET` → committed dev default
+      with a one-time server warning)_
+- [x] `getSessionContext` wired through gate; `roles` matcher in policy engine
+      _(the SDK hook is wired and genuinely sent, but it is a **claim**: the new
+      `GuardServerConfig.resolveSession` re-derives identity from the signed
+      cookie server-side and that is what policy matches and the log records; a
+      claim that disagrees is written into the audit message)_
+- [x] One seeded role rule (billing: `get_patient` clinical notes masked)
+      _(`role-billing-notes-masked`, priority 8, carries a full copy of the
+      default matrix because the transform aspect takes exactly one rule's
+      matrix)_
 - [ ] Review gate (Opus reviewer, suite green)
 - [ ] **Commit: `feat: role-scoped policies with mock identity`**
 
@@ -356,3 +368,47 @@ what's next, deviations/decisions._
   repo creation and Render/Vercel deploys are blocked on user
   credentials — consolidated ask planned after Phase 6. Next: Phase 6
   (roles — small; engine `roles` matcher exists since Phase 2).
+- 2026-08-29 — Phase 6 built (role-scoped policies with mock identity). 54 files
+  / 1138 tests green; typecheck + lint clean. Awaiting the review gate.
+  **The design decision of record:** `GateRequest.sessionContext` (the SDK's
+  `getSessionContext`) is a *claim* from the page, so trusting it for role-scoped
+  policy would let anyone with devtools pick their own role. New optional
+  `GuardServerConfig.resolveSession(request)` resolves the session server-side;
+  when configured, its answer is what the policy engine matches `match.roles`
+  against **and** what the audit entry records. Contract: an answer wins over the
+  claim; `undefined` means "this host has no session here" and falls back to the
+  claim; a throw or a non-session answer records **no** identity (a resolver
+  failure is not permission to believe the page) — all three are tested. A
+  disagreement between claim and resolver is appended to the log entry's message.
+  Portal wiring: `apps/portal/lib/session/` (personas, signed cookie, browser
+  reader), `POST /api/session` (mock login), a header `<select>` persona switcher
+  in the root layout, and `resolveSession` in `lib/guard/server.ts` — which never
+  returns `undefined`, so in this deployment the page's claim is never acted on.
+  Cookie: `base64url(userId.role.issuedAt).base64url(HMAC-SHA256)`, httpOnly,
+  SameSite=Lax, Secure behind https, **no expiry** (documented: mock login, real
+  SSO out of scope per docs/01); signing key derived (domain-separated HMAC) from
+  `PORTAL_SESSION_SECRET` → `GUARD_ORG_SECRET` → committed dev default with its
+  own one-time warning. A second, unsigned `lakeside_persona` cookie exists only
+  so `getSessionContext` has something real to read; the layout also stamps
+  `data-session-*` on `<body>` as the first-load bootstrap. Seed: new
+  `role-billing-notes-masked` (enabled, priority 8, `{roles:["billing"],
+  tools:["get_patient"]}`) carrying a **full copy** of `phi-transform-default`'s
+  matrix with `free_text_phi: "mask"` — the transform aspect takes exactly one
+  rule's matrix, so a delta rule would silently drop every other row. E2E on a
+  fresh data dir (headless Chromium 151, one session): as the default Dr. Reyes
+  `get_patient` returned notes with `tok_name_*`/`tok_mrn_*` spans; switching to
+  Sam Levin **through the header dropdown** set the cookie, flipped the role chip
+  to `billing`, and the same call came back with every note body — and the
+  free-text `summary` — as `▪▪▪` while demographics stayed tokenized/bracketed
+  exactly as before; `search_patients` was unaffected (the rule is scoped to
+  `get_patient`). Log entries carry `session {userId, role}` and the deciding
+  rule id. Also verified by curl: a spoofed `sessionContext` under a billing
+  cookie still gets billing policy and logs "The page claimed … the host
+  application resolved …"; a billing claim with no cookie gets physician policy;
+  a tampered signature falls back to the default persona. Capture:
+  `docs/captures/phase6/header-persona-switcher.png`. Deviations/notes: (1) the
+  masked whole-field rule also blanks `get_patient`'s `summary` string, since
+  that is free text with PHI in it — correct per Phase 3 semantics, and worth a
+  sentence in the video rather than a surprise; (2) mock login is a header
+  switcher, not a `/login` page; (3) `apps/portal/data` was wiped after the run.
+  Next: review gate, then Phase 7.

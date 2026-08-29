@@ -1,0 +1,33 @@
+# Render Blueprint for the Lakeside Medical portal (the stateful half).
+#
+# The portal owns SQLite, so it runs as a long-lived Node web service here
+# rather than on serverless (docs/03-architecture.md → deployment decision).
+# The console is stateless and deploys to Vercel separately (see DEPLOYMENT.md).
+#
+# Free-tier note: the instance sleeps when idle and the disk is ephemeral
+# across deploys/restarts. Both are acceptable for the demo: seed-on-boot
+# rebuilds schema + demo data + default policies on a cold disk. For judging
+# week, the smallest paid instance avoids the ~50s cold-start wait.
+services:
+  - type: web
+    name: webmcp-guard-portal
+    runtime: node
+    plan: free
+    buildCommand: npm install -g pnpm@10.15.0 && pnpm install --frozen-lockfile && pnpm --filter portal build
+    # Render injects $PORT; next start binds to it here rather than the dev
+    # default of 3000.
+    startCommand: pnpm --filter portal exec next start -p $PORT
+    healthCheckPath: /patients
+    envVars:
+      - key: NODE_VERSION
+        value: 22.16.0
+      - key: GUARD_ORG_SECRET
+        generateValue: true
+      - key: GUARD_VAULT_KEY
+        generateValue: true
+      - key: GUARD_ADMIN_TOKEN
+        generateValue: true
+      # Set to the deployed console origin (e.g. https://webmcp-guard-console.vercel.app)
+      # after the Vercel deploy exists; enables CORS on /api/guard/* admin routes.
+      - key: GUARD_CONSOLE_ORIGIN
+        sync: false

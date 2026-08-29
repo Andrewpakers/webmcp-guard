@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import { getPatient, searchPatients } from "@/lib/db/repository";
 import { resolveGuardSecrets } from "@/lib/guard/server";
+import { personaCookieHeaders } from "@/lib/session/cookie";
+import { findPersona } from "@/lib/session/personas";
 
 import { GET, POST } from "./[...route]/route";
 
@@ -21,10 +23,11 @@ const APP = "lakeside-portal";
 function guardRequest(
   segments: string[],
   payload: unknown,
+  headers: Record<string, string> = {},
 ): [Request, { params: Promise<{ route: string[] }> }] {
   const request = new Request(`${BASE}/${segments.join("/")}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify({ version: WIRE_VERSION, payload }),
   });
   return [request, { params: Promise.resolve({ route: segments }) }];
@@ -319,5 +322,146 @@ describe("data controls end to end", () => {
     expect(page.entries.length).toBeGreaterThan(0);
     expect(page.entries[0].tool).toBe("console_reveal");
     expect(page.entries[0].message).toContain(token);
+  });
+});
+
+/**
+ * Phase 6, through the real mounted routes: the role the guard enforces comes
+ * from the portal's **signed cookie**, not from what the page said on the wire.
+ *
+ * Every call below sends a `sessionContext` claiming to be Dr. Reyes. The only
+ * thing that changes is the cookie — and the cookie is what decides.
+ */
+describe("role-scoped policy from the signed session cookie", () => {
+  /** `name=value` pairs, as a browser would send them back. */
+  function cookieHeader(personaId: string): string {
+    const persona = findPersona(personaId);
+    if (persona === undefined) throw new Error(`no persona ${personaId}`);
+    return personaCookieHeaders(persona, { secure: false })
+      .map((header) => header.split(";")[0])
+      .join("; ");
+  }
+
+  /** The page lies about who it is on every one of these calls. */
+  const SPOOFED_CLAIM = { userId: "dr-reyes", role: "physician" } as const;
+
+  const target = () => {
+    const summary = searchPatients({ text: "LM-100001" })[0];
+    return { ...summary, name: `${summary.firstName} ${summary.lastName}` };
+  };
+
+  /** One guarded `get_patient`, with an optional session cookie. */
+  async function getPatientAsPersona(personaId?: string) {
+    const patient = target();
+    const headers: Record<string, string> =
+      personaId === undefined ? {} : { cookie: cookieHeader(personaId) };
+
+    const gate = await payloadOf(
+      await POST(
+        ...guardRequest(
+          ["gate"],
+          {
+            app: APP,
+            tool: "get_patient",
+            args: { patient: patient.mrn },
+            toolTags: ["read", "phi"],
+            sessionContext: SPOOFED_CLAIM,
+          },
+          headers,
+        ),
+      ),
+    );
+
+    const transform = await payloadOf(
+      await POST(
+        ...guardRequest(["transform"], {
+          app: APP,
+          tool: "get_patient",
+          callId: gate.callId,
+          result: {
+            patient: { mrn: patient.mrn, name: patient.name, dob: patient.dob },
+            notes: [
+              {
+                author: "Dr. Alicia Reyes",
+                body: `${patient.name} called about a refill; follow up next week.`,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    const result = transform.result as {
+      patient: Record<string, string>;
+      notes: { body: string }[];
+    };
+    return { gate, transform, result, patient };
+  }
+
+  it("masks note bodies for a billing session, and says whose identity decided", async () => {
+    const { gate, result } = await getPatientAsPersona("sam-levin");
+
+    expect(gate.ruleIds).toContain("role-billing-notes-masked");
+    // Whole-field replacement: the note body is gone, not just the names in it.
+    expect(result.notes[0].body).toBe("▪▪▪");
+    // Demographics are transformed exactly as they are for everyone else.
+    expect(result.patient.name).toMatch(/^tok_name_[0-9a-f]{8}$/);
+    expect(result.patient.mrn).toMatch(/^tok_mrn_[0-9a-f]{8}$/);
+    expect(result.patient.dob).toMatch(/^(age \d{2}-\d{2}|age 90\+|under 10)$/);
+
+    const logs = await GET(
+      new Request(`${BASE}/logs?tool=get_patient`, {
+        headers: { authorization: `Bearer ${resolveGuardSecrets().adminToken}` },
+      }),
+      { params: Promise.resolve({ route: ["logs"] }) },
+    );
+    const page = (await payloadOf(logs)) as unknown as {
+      entries: { id: string; session?: { userId: string; role: string }; message?: string }[];
+    };
+    const entry = page.entries.find((candidate) => candidate.id === gate.callId);
+
+    // The cookie won, and the audit trail records the page's claim losing.
+    expect(entry?.session).toEqual({ userId: "sam-levin", role: "billing" });
+    expect(entry?.message).toContain("The page claimed userId=dr-reyes role=physician");
+    expect(entry?.message).toContain("resolved userId=sam-levin role=billing");
+  });
+
+  it("leaves notes tokenized for a clinical session", async () => {
+    const { gate, result, patient } = await getPatientAsPersona("nurse-okafor");
+
+    expect(gate.ruleIds).not.toContain("role-billing-notes-masked");
+    expect(gate.ruleIds).toContain("phi-transform-default");
+    // Span replacement, not whole-field: the note still reads as a note.
+    expect(result.notes[0].body).toMatch(/^tok_name_[0-9a-f]{8} called about a refill/);
+    expect(result.notes[0].body).not.toContain("▪▪▪");
+    expect(result.notes[0].body).not.toContain(patient.name);
+  });
+
+  it("ignores the page's claim entirely when no cookie is present", async () => {
+    const { gate, result } = await getPatientAsPersona();
+
+    // No cookie resolves to the default persona (Dr. Reyes, physician), which
+    // happens to agree with the claim — so nothing is written about it.
+    expect(gate.ruleIds).not.toContain("role-billing-notes-masked");
+    expect(result.notes[0].body).not.toBe("▪▪▪");
+  });
+
+  it("does not honour a client claim of a billing role without the cookie", async () => {
+    const patient = target();
+    const gate = await payloadOf(
+      await POST(
+        ...guardRequest(["gate"], {
+          app: APP,
+          tool: "get_patient",
+          args: { patient: patient.mrn },
+          toolTags: ["read", "phi"],
+          // A page script inventing the role it wants gets nowhere: the portal's
+          // resolver always answers, so the claim is never even a fallback.
+          sessionContext: { userId: "sam-levin", role: "billing" },
+        }),
+      ),
+    );
+
+    expect(gate.ruleIds).not.toContain("role-billing-notes-masked");
   });
 });
