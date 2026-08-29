@@ -1,6 +1,7 @@
 import { WIRE_VERSION } from "@webmcp-guard/shared";
 import { describe, expect, it } from "vitest";
 
+import { getPatient, searchPatients } from "@/lib/db/repository";
 import { resolveGuardSecrets } from "@/lib/guard/server";
 
 import { GET, POST } from "./[...route]/route";
@@ -15,6 +16,7 @@ import { GET, POST } from "./[...route]/route";
  */
 
 const BASE = "http://localhost:3000/api/guard";
+const APP = "lakeside-portal";
 
 function guardRequest(
   segments: string[],
@@ -128,5 +130,178 @@ describe("routing", () => {
   it("404s an unknown guard endpoint", async () => {
     const response = await POST(...guardRequest(["nope"], {}));
     expect(response.status).toBe(404);
+  });
+});
+
+/**
+ * The Phase 3 headline, through the real mounted routes and the real seeded
+ * patient database: a result goes out tokenized, the agent hands a token back,
+ * the gate turns it into a value the portal's own lookup accepts, and an
+ * administrator can reveal what is behind a token — with that reveal itself
+ * audited.
+ */
+describe("data controls end to end", () => {
+  const patient = () => {
+    const summary = searchPatients({ text: "LM-100001" })[0];
+    return { ...summary, name: `${summary.firstName} ${summary.lastName}` };
+  };
+
+  /** Runs one guarded call and hands back the transformed result. */
+  async function guardedCall(
+    tool: string,
+    args: Record<string, unknown>,
+    toolTags: string[],
+    result: unknown,
+  ) {
+    const gate = await payloadOf(
+      await POST(...guardRequest(["gate"], { app: APP, tool, args, toolTags })),
+    );
+    const transform = await payloadOf(
+      await POST(...guardRequest(["transform"], { app: APP, tool, callId: gate.callId, result })),
+    );
+    return { gate, transform };
+  }
+
+  it("tokenizes names and MRNs on the way out and leaves clinical data alone", async () => {
+    const target = patient();
+    const { transform } = await guardedCall(
+      "search_patients",
+      { condition: "hypertension", limit: 3 },
+      ["read", "phi"],
+      {
+        summary: "1 patient(s) returned of 21 matching.",
+        patients: [
+          {
+            mrn: target.mrn,
+            name: target.name,
+            dob: target.dob,
+            phone: target.phone,
+            primaryConditions: target.primaryConditions,
+            nextAppointmentAt: target.nextAppointmentAt,
+          },
+        ],
+      },
+    );
+
+    const returned = (transform.result as { patients: Record<string, string>[] }).patients[0];
+    expect(returned.mrn).toMatch(/^tok_mrn_[0-9a-f]{8}$/);
+    expect(returned.name).toMatch(/^tok_name_[0-9a-f]{8}$/);
+    expect(returned.dob).toMatch(/^(age \d{2}-\d{2}|age 90\+|under 10)$/);
+    // docs/05: conditions and appointment dates stay in the clear.
+    expect(returned.primaryConditions).toEqual(target.primaryConditions);
+    expect(returned.nextAppointmentAt).toBe(target.nextAppointmentAt);
+    expect(transform.classesFound).toContain("name");
+    expect(transform.classesFound).toContain("mrn");
+  });
+
+  it("resolves a name token back into a full name the portal can look up", async () => {
+    const target = patient();
+    const { transform } = await guardedCall("search_patients", {}, ["read", "phi"], {
+      patients: [{ mrn: target.mrn, name: target.name }],
+    });
+    const tokens = (transform.result as { patients: Record<string, string>[] }).patients[0];
+
+    const gate = await payloadOf(
+      await POST(
+        ...guardRequest(["gate"], {
+          app: APP,
+          tool: "get_patient",
+          args: { patient: tokens.name },
+          toolTags: ["read", "phi"],
+        }),
+      ),
+    );
+
+    expect(gate.args).toEqual({ patient: target.name });
+    // And that is an identifier the host app's own lookup accepts.
+    expect(getPatient(target.name)?.mrn).toBe(target.mrn);
+  });
+
+  it("detokenizes a name mentioned inside a note the agent is writing", async () => {
+    const target = patient();
+    const { transform } = await guardedCall("search_patients", {}, ["read", "phi"], {
+      patients: [{ mrn: target.mrn, name: target.name }],
+    });
+    const tokens = (transform.result as { patients: Record<string, string>[] }).patients[0];
+
+    const gate = await payloadOf(
+      await POST(
+        ...guardRequest(["gate"], {
+          app: APP,
+          tool: "add_visit_note",
+          args: {
+            patient: tokens.mrn,
+            note: `Emergency contact confirmed for ${tokens.name}.`,
+          },
+          toolTags: ["write", "phi"],
+        }),
+      ),
+    );
+
+    expect(gate.args).toEqual({
+      patient: target.mrn,
+      note: `Emergency contact confirmed for ${target.name}.`,
+    });
+  });
+
+  it("finds a seeded patient's name in free text through the host's dictionary", async () => {
+    const target = patient();
+    const { transform } = await guardedCall(
+      "get_patient",
+      { patient: target.mrn },
+      ["read", "phi"],
+      {
+        notes: [{ author: "Dr. Alicia Reyes", body: `${target.name} called about a refill.` }],
+      },
+    );
+
+    const body = (transform.result as { notes: { body: string }[] }).notes[0].body;
+    expect(body).toMatch(/^tok_name_[0-9a-f]{8} called about a refill\.$/);
+    expect(transform.classesFound).toContain("free_text_phi");
+  });
+
+  it("reveals a token to an administrator and records the reveal", async () => {
+    const target = patient();
+    const { transform } = await guardedCall("search_patients", {}, ["read", "phi"], {
+      patients: [{ mrn: target.mrn }],
+    });
+    const token = (transform.result as { patients: { mrn: string }[] }).patients[0].mrn;
+    const adminToken = resolveGuardSecrets().adminToken;
+
+    const [request, context] = guardRequest(["tokens", "reveal"], { token });
+    const unauthorized = await POST(request, context);
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await POST(
+      new Request(`${BASE}/tokens/reveal`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({ version: WIRE_VERSION, payload: { token } }),
+      }),
+      { params: Promise.resolve({ route: ["tokens", "reveal"] }) },
+    );
+
+    expect(authorized.status).toBe(200);
+    expect(await payloadOf(authorized)).toEqual({
+      token,
+      dataClass: "mrn",
+      value: target.mrn,
+    });
+
+    const logs = await GET(
+      new Request(`${BASE}/logs?app=webmcp-guard&tool=console_reveal`, {
+        headers: { authorization: `Bearer ${adminToken}` },
+      }),
+      { params: Promise.resolve({ route: ["logs"] }) },
+    );
+    const page = (await payloadOf(logs)) as unknown as {
+      entries: { tool: string; message?: string }[];
+    };
+    expect(page.entries.length).toBeGreaterThan(0);
+    expect(page.entries[0].tool).toBe("console_reveal");
+    expect(page.entries[0].message).toContain(token);
   });
 });

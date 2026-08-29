@@ -1,9 +1,14 @@
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { SEED_PATIENT_COUNT } from "@/lib/db/seed";
+import { createTestDb } from "@/lib/db/testing";
 
 import {
   GUARD_DEV_DEFAULTS,
   getGuardServer,
   insecureDefaultsWarning,
+  patientNameDictionary,
   resetGuardServer,
   resetGuardServerWarning,
   resolveGuardSecrets,
@@ -117,5 +122,56 @@ describe("getGuardServer", () => {
 
     getGuardServer();
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe("patientNameDictionary", () => {
+  it("hands the classifier every patient's full name", () => {
+    const db = createTestDb();
+    try {
+      const names = patientNameDictionary(db);
+
+      expect(names).toHaveLength(SEED_PATIENT_COUNT);
+      const first = db.prepare("SELECT first_name, last_name FROM patients LIMIT 1").get() as {
+        first_name: string;
+        last_name: string;
+      };
+      expect(names).toContain(`${first.first_name} ${first.last_name}`);
+      // Full names only — a bare surname in a note is not evidence of a person.
+      expect(names.every((name) => name.includes(" "))).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("picks up a patient added after the server was built", () => {
+    const db = createTestDb();
+    try {
+      db.prepare(
+        `INSERT INTO patients (
+           id, mrn, first_name, last_name, dob, ssn, phone, email,
+           address_street, address_city, address_state, address_zip,
+           insurance_carrier, insurance_member_id,
+           primary_conditions, medications, allergies, created_at
+         ) VALUES (
+           'new-1', 'LM-999999', 'Newly', 'Registered', '1990-01-01', '900-00-0001',
+           '(206) 555-0100', 'newly@example.com', '1 New St', 'Portland', 'OR', '97201',
+           'Northwater Health', 'NEW000000001', '[]', '[]', '[]', '2026-01-01T00:00:00.000Z'
+         )`,
+      ).run();
+
+      expect(patientNameDictionary(db)).toContain("Newly Registered");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("returns nothing rather than throwing when the table is missing", () => {
+    const db = new Database(":memory:");
+    try {
+      expect(patientNameDictionary(db)).toEqual([]);
+    } finally {
+      db.close();
+    }
   });
 });

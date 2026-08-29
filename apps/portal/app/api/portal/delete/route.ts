@@ -1,5 +1,5 @@
 import { jsonError, jsonOk, readJsonBody, stringField } from "@/lib/http";
-import { deletePatient } from "@/lib/db/repository";
+import { deletePatient, patientNotFoundMessage } from "@/lib/db/repository";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +21,7 @@ export async function POST(request: Request): Promise<Response> {
   if (!id) return jsonError(400, "Missing required field 'id' (a patient id or MRN).");
 
   const deleted = deletePatient(id);
-  if (!deleted) return jsonError(404, `No patient found for '${id}'.`);
+  if (!deleted) return jsonError(404, patientNotFoundMessage(id));
 
   return jsonOk({ deleted });
 }

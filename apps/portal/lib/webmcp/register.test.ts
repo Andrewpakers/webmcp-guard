@@ -347,7 +347,10 @@ describe("registered tool metadata", () => {
       get_patient: ["read", "phi"],
       update_patient: ["write", "phi"],
       add_visit_note: ["write", "phi"],
-      list_appointments: ["read"],
+      // Deviation from docs/05 (`read` only), argued at the definition: this
+      // tool returns patientName and patientMrn, and without `phi` the seeded
+      // transform rule never saw them.
+      list_appointments: ["read", "phi"],
       export_patients: ["read", "phi", "bulk", "destructive-adjacent"],
       delete_patient: ["write", "destructive"],
     });

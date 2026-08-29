@@ -34,7 +34,12 @@ export const DEFAULT_POLICY_RULES: RuleDraft[] = [
         insurance_id: "tokenize",
         dob: "contextualize",
         address: "contextualize",
-        // phone, email, credit_card and free_text_phi fall back to passthrough.
+        // Deviation from docs/05 default policy 1 ("passthrough the rest"):
+        // emails embed the patient's name (tricia.bashirian27@…), which would
+        // undo name tokenization in every get_patient result. Masking keeps
+        // the headline honest; flip it live in the console to demo the matrix.
+        email: "mask",
+        // phone, credit_card and free_text_phi fall back to passthrough.
       }),
     },
   },

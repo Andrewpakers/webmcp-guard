@@ -81,6 +81,32 @@ export function insecureDefaultsWarning(fellBack: readonly string[]): string {
   );
 }
 
+/**
+ * Every patient's full name, for the guard's free-text dictionary scan.
+ *
+ * `docs/04-sdk-requirements.md` is explicit that this is the right answer for
+ * names: regexes cannot recognise a person, but the host application already
+ * knows exactly who its people are. One indexed `SELECT` over ~60 rows, called
+ * at most once every 30 seconds by the guard (it caches the compiled matcher),
+ * so a patient added a minute ago is detectable in a visit note without a
+ * restart.
+ *
+ * Swallows its own errors: the guard treats a throwing dictionary as an empty
+ * one, but a boot-order surprise should not print a stack trace on every call.
+ */
+export function patientNameDictionary(database: BetterSqlite3.Database): string[] {
+  try {
+    const rows = database
+      .prepare("SELECT first_name || ' ' || last_name AS name FROM patients")
+      .all() as { name: string }[];
+    return rows.map((row) => row.name).filter((name) => name.trim().length > 0);
+  } catch {
+    // The table may not exist yet on a very first boot; the other two
+    // classifier passes carry the call.
+    return [];
+  }
+}
+
 const GLOBAL_KEY = Symbol.for("lakeside.portal.guard-server");
 
 interface CachedGuard {
@@ -126,6 +152,8 @@ export function getGuardServer(): GuardServer {
     orgSecret: secrets.orgSecret,
     vaultKey: secrets.vaultKey,
     adminToken: secrets.adminToken,
+    // The host app teaches the classifier who its people are (docs/04).
+    nameDictionary: () => patientNameDictionary(database),
     ...(secrets.consoleOrigin !== undefined ? { consoleOrigin: secrets.consoleOrigin } : {}),
   });
 

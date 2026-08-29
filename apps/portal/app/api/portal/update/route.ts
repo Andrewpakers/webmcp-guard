@@ -1,5 +1,5 @@
 import { jsonError, jsonOk, readJsonBody, stringField } from "@/lib/http";
-import { updatePatient } from "@/lib/db/repository";
+import { patientNotFoundMessage, updatePatient } from "@/lib/db/repository";
 import type { PatientUpdate } from "@/lib/db/types";
 
 export const runtime = "nodejs";
@@ -50,7 +50,7 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const patient = updatePatient(id, fields);
-  if (!patient) return jsonError(404, `No patient found for '${id}'.`);
+  if (!patient) return jsonError(404, patientNotFoundMessage(id));
 
   return jsonOk({ patient, updated: Object.keys(fields) });
 }

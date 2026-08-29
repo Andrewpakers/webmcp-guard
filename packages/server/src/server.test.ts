@@ -1,4 +1,5 @@
 import {
+  PerClassTransformSchema,
   type GateResponse,
   type GuardStats,
   type GuardStorage,
@@ -404,33 +405,38 @@ describe("POST /transform", () => {
     );
   }
 
-  it("completes the pending entry and returns the result unchanged", async () => {
+  it("completes the pending entry with the transformed result and the classes found", async () => {
     const gate = await gateAllow();
+    const raw = { patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }] };
 
     const response = await send(guard, "POST", "transform", {
-      payload: {
-        app: APP,
-        tool: "search_patients",
-        callId: gate.callId,
-        result: { patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }] },
-      },
+      payload: { app: APP, tool: "search_patients", callId: gate.callId, result: raw },
     });
 
     const transform = await payloadOf<TransformResponse>(response);
     expect(response.status).toBe(200);
-    expect(transform.result).toEqual({ patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }] });
-    expect(transform.classesFound).toEqual([]);
+
+    const patient = (transform.result as typeof raw).patients[0];
+    expect(patient.name).toMatch(/^tok_name_[0-9a-f]{8}$/);
+    expect(patient.mrn).toMatch(/^tok_mrn_[0-9a-f]{8}$/);
+    expect(transform.classesFound).toEqual(["mrn", "name"]);
     // Only the transform-aspect rule is reported back on this half.
     expect(transform.ruleIds).toEqual(["phi-transform-default"]);
+
+    // Both tokens are in the vault, so the next call can pass them back.
+    expect(await storage.getVaultEntry(patient.mrn)).not.toBeNull();
+    expect(await storage.getVaultEntry(patient.name)).not.toBeNull();
 
     const entry = await storage.getLog(gate.callId);
     expect(entry).toMatchObject({
       status: "complete",
       verdict: "allow",
+      dataClasses: ["mrn", "name"],
       payloads: {
         argsBefore: { query: "hypertension" },
-        resultBefore: { patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }] },
-        resultAfter: { patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }] },
+        // The audit trail keeps the original alongside what the agent received.
+        resultBefore: raw,
+        resultAfter: { patients: [{ name: patient.name, mrn: patient.mrn }] },
       },
     });
     expect(entry?.durationMs).toBeGreaterThanOrEqual(0);
@@ -527,6 +533,369 @@ describe("POST /transform", () => {
     const response = await send(guard, "POST", "transform", { payload: { app: APP } });
     expect(response.status).toBe(400);
     expect((await errorOf(response)).code).toBe("bad_request");
+  });
+});
+
+/**
+ * Phase 3, end to end through the routes: a result goes out tokenized, the
+ * agent hands a token back, and the gate turns it into the real value before
+ * the site's own code ever runs (`docs/03` steps 4–8).
+ */
+describe("the data pipeline through /gate and /transform", () => {
+  async function searchAndTransform(result: unknown): Promise<TransformResponse> {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload() }),
+    );
+    return payloadOf<TransformResponse>(
+      await send(guard, "POST", "transform", {
+        payload: { app: APP, tool: "search_patients", callId: gate.callId, result },
+      }),
+    );
+  }
+
+  it("round-trips a token from a result back into the next call's args", async () => {
+    const transform = await searchAndTransform({
+      patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }],
+    });
+    const token = (transform.result as { patients: { mrn: string }[] }).patients[0].mrn;
+
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", {
+        payload: gatePayload({ tool: "get_patient", args: { patient: token } }),
+      }),
+    );
+
+    expect(gate.verdict).toBe("allow");
+    expect(gate.args).toEqual({ patient: "LM-100001" });
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry?.payloads.argsBefore).toEqual({ patient: token });
+    expect(entry?.payloads.argsAfter).toEqual({ patient: "LM-100001" });
+    expect(entry?.message).toContain("Detokenized 1 argument value");
+    // The MRN the tool is about to receive is classified on the way in. The
+    // `patient` key claims no class, so the value goes through the free-text
+    // detectors and is reported as both.
+    expect(entry?.dataClasses).toEqual(["mrn", "free_text_phi"]);
+  });
+
+  it("substitutes tokens buried inside free text", async () => {
+    const transform = await searchAndTransform({
+      patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }],
+    });
+    const { name, mrn } = (transform.result as { patients: { name: string; mrn: string }[] })
+      .patients[0];
+
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", {
+        payload: gatePayload({
+          tool: "add_visit_note",
+          args: { patient: mrn, note: `Called ${name} about the refill.` },
+        }),
+      }),
+    );
+
+    expect(gate.args).toEqual({
+      patient: "LM-100001",
+      note: "Called Ada Whitfield about the refill.",
+    });
+  });
+
+  it("leaves a token the vault has never seen exactly as it arrived", async () => {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", {
+        payload: gatePayload({ tool: "get_patient", args: { patient: "tok_mrn_deadbeef" } }),
+      }),
+    );
+
+    expect(gate.verdict).toBe("allow");
+    expect(gate.args).toEqual({ patient: "tok_mrn_deadbeef" });
+    expect((await storage.getLog(gate.callId))?.message).toBeUndefined();
+  });
+
+  it("never detokenizes for a verdict that is not allow", async () => {
+    const transform = await searchAndTransform({ patients: [{ mrn: "LM-100060" }] });
+    const token = (transform.result as { patients: { mrn: string }[] }).patients[0].mrn;
+
+    const vaultReads = vi.spyOn(storage, "getVaultEntry");
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", {
+        payload: gatePayload({
+          tool: "delete_patient",
+          args: { patient: token },
+          toolTags: ["write", "destructive"],
+        }),
+      }),
+    );
+
+    expect(gate.verdict).toBe("deny");
+    expect(gate.args).toBeUndefined();
+    // A blocked call must not be usable as a detokenization oracle.
+    expect(vaultReads).not.toHaveBeenCalled();
+
+    const entry = await storage.getLog(gate.callId);
+    expect(entry?.payloads.argsBefore).toEqual({ patient: token });
+    expect(entry?.payloads.argsAfter).toEqual({ patient: token });
+    vaultReads.mockRestore();
+  });
+
+  it("honours a policy edit made between the gate call and the transform call", async () => {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload() }),
+    );
+
+    // The console changes the matrix while the tool is still running.
+    await storage.updateRule("phi-transform-default", {
+      action: {
+        type: "transform",
+        perClass: PerClassTransformSchema.parse({ name: "mask", mrn: "passthrough" }),
+      },
+    });
+
+    const transform = await payloadOf<TransformResponse>(
+      await send(guard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: { patients: [{ name: "Ada Whitfield", mrn: "LM-100001" }] },
+        },
+      }),
+    );
+
+    expect(transform.result).toEqual({ patients: [{ name: "▪▪▪", mrn: "LM-100001" }] });
+  });
+
+  it("stops transforming when the matched rule is disabled mid-call", async () => {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload() }),
+    );
+    await storage.updateRule("phi-transform-default", { enabled: false });
+
+    const transform = await payloadOf<TransformResponse>(
+      await send(guard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: { patients: [{ mrn: "LM-100001" }] },
+        },
+      }),
+    );
+
+    expect(transform.result).toEqual({ patients: [{ mrn: "LM-100001" }] });
+    expect(transform.ruleIds).toEqual([]);
+    // Classification still happened, so the audit log records what went out.
+    expect(transform.classesFound).toEqual(["mrn"]);
+  });
+
+  it("scans free text against the host's name dictionary, and caches it", async () => {
+    const nameDictionary = vi.fn(() => ["Ada Whitfield"]);
+    const dictionaryGuard = createGuardServer(
+      config(memoryStorage(), { nameDictionary, nameDictionaryTtlMs: 60_000 }),
+    );
+    await dictionaryGuard.ready();
+
+    const gate = await payloadOf<GateResponse>(
+      await send(dictionaryGuard, "POST", "gate", { payload: gatePayload() }),
+    );
+    const transform = await payloadOf<TransformResponse>(
+      await send(dictionaryGuard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: { notes: [{ body: "Ada Whitfield called about a refill." }] },
+        },
+      }),
+    );
+
+    const body = (transform.result as { notes: { body: string }[] }).notes[0].body;
+    expect(body).toMatch(/^tok_name_[0-9a-f]{8} called about a refill\.$/);
+    expect(transform.classesFound).toEqual(["name", "free_text_phi"]);
+
+    // Gate and transform both classified, but the host was asked once.
+    expect(nameDictionary).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps working when the host's name dictionary throws", async () => {
+    const nameDictionary = vi.fn(() => {
+      throw new Error("database is down");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const brokenGuard = createGuardServer(config(memoryStorage(), { nameDictionary }));
+    await brokenGuard.ready();
+
+    const gate = await payloadOf<GateResponse>(
+      await send(brokenGuard, "POST", "gate", { payload: gatePayload() }),
+    );
+    const transform = await payloadOf<TransformResponse>(
+      await send(brokenGuard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: { patients: [{ mrn: "LM-100001" }] },
+        },
+      }),
+    );
+
+    // The other two passes still fire.
+    expect((transform.result as { patients: { mrn: string }[] }).patients[0].mrn).toMatch(
+      /^tok_mrn_/,
+    );
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("uses a deployment's own MRN pattern", async () => {
+    const custom = createGuardServer(config(memoryStorage(), { mrnPattern: /\bREC\d{4}\b/g }));
+    await custom.ready();
+
+    const gate = await payloadOf<GateResponse>(
+      await send(custom, "POST", "gate", { payload: gatePayload() }),
+    );
+    const transform = await payloadOf<TransformResponse>(
+      await send(custom, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: { notes: [{ body: "Chart REC0042 and LM-100001." }] },
+        },
+      }),
+    );
+
+    const body = (transform.result as { notes: { body: string }[] }).notes[0].body;
+    expect(body).toMatch(/^Chart tok_mrn_[0-9a-f]{8} and LM-100001\.$/);
+  });
+});
+
+describe("POST /tokens/reveal", () => {
+  /** Puts one real vault row in place by running a result through /transform. */
+  async function seedVault(): Promise<{ token: string; callId: string }> {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload() }),
+    );
+    const transform = await payloadOf<TransformResponse>(
+      await send(guard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: { patients: [{ ssn: "927-78-1337" }] },
+        },
+      }),
+    );
+    return {
+      token: (transform.result as { patients: { ssn: string }[] }).patients[0].ssn,
+      callId: gate.callId,
+    };
+  }
+
+  it("refuses an unauthenticated reveal", async () => {
+    const { token } = await seedVault();
+    const response = await send(guard, "POST", "tokens/reveal", { payload: { token } });
+
+    expect(response.status).toBe(401);
+    expect((await errorOf(response)).code).toBe("unauthorized");
+    // Nothing was revealed, so nothing was logged.
+    expect((await storage.queryLogs({ app: "webmcp-guard" })).total).toBe(0);
+  });
+
+  it("returns the original value to an admin and logs the reveal", async () => {
+    const { token } = await seedVault();
+
+    const response = await send(guard, "POST", "tokens/reveal", {
+      payload: { token },
+      token: ADMIN_TOKEN,
+    });
+    expect(response.status).toBe(200);
+    expect(await payloadOf(response)).toEqual({
+      token,
+      dataClass: "ssn",
+      value: "927-78-1337",
+    });
+
+    const audit = await storage.queryLogs({ app: "webmcp-guard" });
+    expect(audit.total).toBe(1);
+    expect(audit.entries[0]).toMatchObject({
+      app: "webmcp-guard",
+      tool: "console_reveal",
+      verdict: "allow",
+      status: "complete",
+    });
+    expect(audit.entries[0].message).toContain(token);
+    expect(audit.entries[0].message).toContain("ssn");
+    // The audit entry names what was revealed; it never copies the plaintext.
+    expect(JSON.stringify(audit.entries[0])).not.toContain("927-78-1337");
+  });
+
+  it("404s an unknown token without writing an audit entry", async () => {
+    const response = await send(guard, "POST", "tokens/reveal", {
+      payload: { token: "tok_ssn_deadbeef" },
+      token: ADMIN_TOKEN,
+    });
+
+    expect(response.status).toBe(404);
+    expect((await errorOf(response)).code).toBe("not_found");
+    expect((await storage.queryLogs({ app: "webmcp-guard" })).total).toBe(0);
+  });
+
+  it("acknowledges and logs a payload reveal by log id", async () => {
+    const { callId } = await seedVault();
+
+    const response = await send(guard, "POST", "tokens/reveal", {
+      payload: { logId: callId },
+      token: ADMIN_TOKEN,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await payloadOf(response)).toEqual({ logId: callId, acknowledged: true });
+
+    const audit = await storage.queryLogs({ app: "webmcp-guard" });
+    expect(audit.total).toBe(1);
+    expect(audit.entries[0].message).toContain(callId);
+    expect(audit.entries[0].message).toContain("payloads");
+  });
+
+  it("404s an unknown log id", async () => {
+    const response = await send(guard, "POST", "tokens/reveal", {
+      payload: { logId: "not-a-log" },
+      token: ADMIN_TOKEN,
+    });
+    expect(response.status).toBe(404);
+  });
+
+  it("requires at least one of token and logId", async () => {
+    const response = await send(guard, "POST", "tokens/reveal", {
+      payload: {},
+      token: ADMIN_TOKEN,
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("reports a row it cannot decrypt rather than pretending it is unknown", async () => {
+    const { token } = await seedVault();
+    const entry = await storage.getVaultEntry(token);
+    if (entry === null) throw new Error("expected a vault entry");
+
+    const tampered = Buffer.from(entry.authTag, "base64");
+    tampered[0] ^= 0xff;
+    // Reach past the first-write-wins guard to simulate a corrupted store.
+    (storage as unknown as { reset(): void }).reset();
+    await storage.putVaultEntry({ ...entry, authTag: tampered.toString("base64") });
+
+    const response = await send(guard, "POST", "tokens/reveal", {
+      payload: { token },
+      token: ADMIN_TOKEN,
+    });
+    expect(response.status).toBe(500);
+    expect((await errorOf(response)).message).toContain("GUARD_VAULT_KEY");
+  });
+
+  it("rejects other methods and unknown token routes", async () => {
+    expect((await send(guard, "GET", "tokens/reveal", { token: ADMIN_TOKEN })).status).toBe(405);
+    expect((await send(guard, "POST", "tokens/lookup", { token: ADMIN_TOKEN })).status).toBe(404);
   });
 });
 

@@ -104,21 +104,30 @@ suite green).
 
 ## Phase 3 — Data controls (the headline feature)
 
-- [ ] Classifier: field-name pass + regex pass + seeded-name dictionary scan
-      for free text (all classes in `04-sdk-requirements.md`)
-- [ ] Deterministic tokenization + encrypted vault; token format
-      `tok_<class>_<hex8>`
-- [ ] Outbound transform per policy matrix: tokenize / mask / contextualize
-      (DOB→age bracket, address→city/state) / passthrough
-- [ ] Inbound detokenization in `/gate` (tokens in args → real values, policy
-      permitting; unknown tokens untouched)
-- [ ] Free-text span replacement in visit notes (in and out)
-- [ ] End-to-end agent test in Chrome: search → tokens returned → pass token to
+- [x] Classifier: field-name pass + regex pass + seeded-name dictionary scan
+      for free text (all classes in `04-sdk-requirements.md`) _(dictionary is
+      host-supplied via `GuardServerConfig.nameDictionary`; full names +
+      honorific+surname only — bare first names by design)_
+- [x] Deterministic tokenization + encrypted vault; token format
+      `tok_<class>_<hex8>` _(HMAC-SHA256 over class-bound canonicalized value;
+      AES-256-GCM vault with the token as AAD; 32-bit truncation trade-off
+      documented in tokenize.ts)_
+- [x] Outbound transform per policy matrix: tokenize / mask / contextualize
+      (DOB→age bracket, address→city/state) / passthrough _(missing
+      contextualizer falls back to tokenize, never passthrough)_
+- [x] Inbound detokenization in `/gate` (tokens in args → real values, policy
+      permitting; unknown tokens untouched) _(only after an allow verdict;
+      single pass, vault values never re-scanned)_
+- [x] Free-text span replacement in visit notes (in and out) _(spans follow
+      their own class's matrix action; free_text_phi reported as a class)_
+- [x] End-to-end agent test in Chrome: search → tokens returned → pass token to
       `get_patient` → correct record; add note referencing token → resolves
-- [ ] Unit tests: each detector (+ Luhn negatives), token determinism,
+      _(headless Chromium harness; note stored with real names, agent echo
+      tokenized; verified again post-review on a fresh DB)_
+- [x] Unit tests: each detector (+ Luhn negatives), token determinism,
       round-trip, transform matrix
-- [ ] Review gate (**Fable** — critical phase, suite green)
-- [ ] **Commit: `feat(sdk): classification, tokenization, detokenization`**
+- [x] Review gate (**Fable** — critical phase, suite green) — APPROVED
+- [x] **Commit: `feat(sdk): classification, tokenization, detokenization`**
 
 ## Phase 4 — Console (minimum submittable product line)
 
@@ -241,3 +250,23 @@ what's next, deviations/decisions._
   endpoint for registration-time policy fetch. Deny path verified: curl,
   headless-Chromium tool call (patient survived), and the audit log all
   agree. Next: Phase 3 (classification/tokenization/detokenization).
+- 2026-08-29 — Phase 3 complete (data controls). 45 files / 877 tests green;
+  Fable review APPROVED (crypto reviewed line-by-line: class-bound HMAC,
+  AES-GCM with token-as-AAD, honest 32-bit-truncation note, no
+  detokenization before an allow verdict, reveal-audited-before-answering).
+  Deviations of record: (1) `list_appointments` now tagged
+  `["read","phi"]` — with `read` alone the seeded transform rule never
+  matched and patient names/MRNs leaked in the clear; schedule fields stay
+  untransformed so the "not redaction-happy" beat survives. (2) Seeded
+  default policy sets `email: mask` (docs/05 says passthrough) — emails
+  embed patient names and would undo name tokenization; one-line revert if
+  unwanted. (3) Tools return structured objects with a `summary` field (the
+  classifier needs real keys; SDK stringifies for the agent). (4)
+  `insurance*` keys all classify as insurance_id, so carrier names
+  tokenize — conservative. Known gaps (documented, acceptable):
+  `export_patients` CSV only partially protected (Phase 5 justification
+  gate is the real control; structured export rows are future work); no
+  free-text regex for address/insurance_id; bare first names in prose
+  unmatched. Phase 4 console was built in parallel (sibling package, no
+  conflicts) and verified live against the real API. Next: Phase 4 gate +
+  commit, then Phase 5.

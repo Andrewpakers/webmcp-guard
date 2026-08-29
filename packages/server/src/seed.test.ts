@@ -51,7 +51,8 @@ describe("DEFAULT_POLICY_RULES", () => {
       dob: "contextualize",
       address: "contextualize",
       phone: "passthrough",
-      email: "passthrough",
+      // Masked, not passthrough: emails embed patient names (see seed.ts).
+      email: "mask",
       credit_card: "passthrough",
       free_text_phi: "passthrough",
     });

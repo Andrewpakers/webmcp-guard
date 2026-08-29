@@ -1,5 +1,5 @@
 import { jsonError, jsonOk, readJsonBody, stringField } from "@/lib/http";
-import { addVisitNote } from "@/lib/db/repository";
+import { addVisitNote, patientNotFoundMessage } from "@/lib/db/repository";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,7 +28,7 @@ export async function POST(request: Request): Promise<Response> {
 
   const author = stringField(payload, "author") ?? "Portal user";
   const note = addVisitNote(patientId, noteBody, author);
-  if (!note) return jsonError(404, `No patient found for '${patientId}'.`);
+  if (!note) return jsonError(404, patientNotFoundMessage(patientId));
 
   return jsonOk({ note }, 201);
 }

@@ -9,6 +9,7 @@ import {
   exportPatientsCsv,
   getPatient,
   listAppointments,
+  patientNotFoundMessage,
   searchPatients,
   updatePatient,
 } from "./repository";
@@ -139,6 +140,68 @@ describe("getPatient", () => {
   it("returns null for an unknown identifier", () => {
     expect(getPatient("LM-999999", db)).toBeNull();
     expect(getPatient("", db)).toBeNull();
+  });
+
+  /**
+   * Phase 3: a `tok_name_…` the agent carried back from a search result is
+   * resolved to a full name before the tool runs, so a full name has to work as
+   * an identifier — but only when it is unambiguous.
+   */
+  describe("full-name lookup", () => {
+    const target = () => getPatient("LM-100001", db);
+
+    it("looks a patient up by their exact full name", () => {
+      const patient = target();
+      const name = `${patient?.firstName} ${patient?.lastName}`;
+      expect(getPatient(name, db)?.mrn).toBe("LM-100001");
+    });
+
+    it("is case-insensitive and tolerates sloppy whitespace", () => {
+      const patient = target();
+      expect(getPatient(`${patient?.firstName} ${patient?.lastName}`.toUpperCase(), db)?.mrn).toBe(
+        "LM-100001",
+      );
+      expect(getPatient(`  ${patient?.firstName}   ${patient?.lastName}  `, db)?.mrn).toBe(
+        "LM-100001",
+      );
+    });
+
+    it("refuses a partial name", () => {
+      expect(getPatient(target()?.lastName ?? "", db)).toBeNull();
+      expect(getPatient(target()?.firstName ?? "", db)).toBeNull();
+    });
+
+    it("refuses an ambiguous name rather than guessing which patient was meant", () => {
+      const patient = target();
+      const name = `${patient?.firstName} ${patient?.lastName}`;
+      // A second patient with the same name: putting a note on the wrong chart
+      // is worse than failing the call.
+      db.prepare(
+        "UPDATE patients SET first_name = @first, last_name = @last WHERE mrn = 'LM-100002'",
+      ).run({ first: patient?.firstName, last: patient?.lastName });
+
+      expect(getPatient(name, db)).toBeNull();
+      // The unambiguous identifiers still work.
+      expect(getPatient("LM-100001", db)?.mrn).toBe("LM-100001");
+      expect(getPatient("LM-100002", db)?.mrn).toBe("LM-100002");
+    });
+
+    it("prefers an id or MRN over a name that happens to collide with one", () => {
+      db.prepare(
+        "UPDATE patients SET first_name = 'LM-100001', last_name = 'X' WHERE mrn = 'LM-100003'",
+      ).run();
+      expect(getPatient("LM-100001", db)?.mrn).toBe("LM-100001");
+    });
+  });
+});
+
+describe("patientNotFoundMessage", () => {
+  it("names every identifier that would have worked", () => {
+    const message = patientNotFoundMessage("Nobody Here");
+    expect(message).toContain("Nobody Here");
+    expect(message).toContain("MRN");
+    expect(message).toContain("full name");
+    expect(message).toContain("exactly one patient");
   });
 });
 

@@ -213,13 +213,52 @@ export function countPatients(
   return row.count;
 }
 
-function findPatientRow(idOrMrn: string, db: BetterSqlite3.Database): PatientRow | undefined {
-  return db
-    .prepare("SELECT * FROM patients WHERE id = @key OR mrn = @key COLLATE NOCASE LIMIT 1")
-    .get({ key: idOrMrn.trim() }) as PatientRow | undefined;
+/**
+ * The one sentence every lookup failure answers with. It exists as a function
+ * so all four write routes say the same thing, and because an agent reads it:
+ * it has to name every identifier that *would* have worked.
+ */
+export function patientNotFoundMessage(key: string): string {
+  return (
+    `No patient found for '${key}'. Identify a patient by their MRN (e.g. 'LM-100042'), ` +
+    `by their internal id, or by their full name exactly as it is on file ` +
+    `(e.g. 'Tricia Bashirian') — a name is only accepted when it matches exactly one patient, ` +
+    `so use search_patients first if it might be ambiguous.`
+  );
 }
 
-/** Looks a patient up by primary key *or* MRN — docs/05 requires both. */
+/**
+ * Resolves the several things a caller might hand us for "which patient":
+ * internal id, MRN, or — since Phase 3 — a full name.
+ *
+ * The name branch exists because of detokenization: a `tok_name_…` the agent
+ * carried back from a search result becomes "Tricia Bashirian" before the tool
+ * runs, and that string has to be usable as an identifier. It resolves **only
+ * when exactly one patient matches**; two Ada Byrons are an ambiguous request,
+ * and quietly picking one of them is the sort of thing that puts a note on the
+ * wrong chart.
+ */
+function findPatientRow(idOrMrn: string, db: BetterSqlite3.Database): PatientRow | undefined {
+  const key = idOrMrn.trim().replace(/\s+/g, " ");
+  if (key.length === 0) return undefined;
+
+  const direct = db
+    .prepare("SELECT * FROM patients WHERE id = @key OR mrn = @key COLLATE NOCASE LIMIT 1")
+    .get({ key }) as PatientRow | undefined;
+  if (direct) return direct;
+
+  const byName = db
+    .prepare(
+      `SELECT * FROM patients
+        WHERE LOWER(first_name || ' ' || last_name) = LOWER(@key)
+        LIMIT 2`,
+    )
+    .all({ key }) as PatientRow[];
+
+  return byName.length === 1 ? byName[0] : undefined;
+}
+
+/** Looks a patient up by primary key, MRN or unambiguous full name. */
 export function getPatient(
   idOrMrn: string,
   db: BetterSqlite3.Database = getDb(),

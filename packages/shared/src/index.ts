@@ -10,6 +10,8 @@ export * from "./policy";
 export * from "./wire";
 export * from "./log";
 export * from "./storage";
+export * from "./token";
+export * from "./reveal";
 
 /**
  * The storage conformance kit is deliberately *not* re-exported here: it

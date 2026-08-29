@@ -1,5 +1,5 @@
 import { jsonError, jsonOk, param } from "@/lib/http";
-import { getPatient } from "@/lib/db/repository";
+import { getPatient, patientNotFoundMessage } from "@/lib/db/repository";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +15,7 @@ export function GET(request: Request): Response {
   if (!id) return jsonError(400, "Missing required query parameter 'id' (a patient id or MRN).");
 
   const patient = getPatient(id);
-  if (!patient) return jsonError(404, `No patient found for '${id}'.`);
+  if (!patient) return jsonError(404, patientNotFoundMessage(id));
 
   return jsonOk({ patient });
 }
