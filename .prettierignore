@@ -1,0 +1,12 @@
+node_modules/
+.next/
+dist/
+out/
+coverage/
+pnpm-lock.yaml
+next-env.d.ts
+
+# Authored prose that is the project's spec — kept byte-for-byte as written.
+docs/
+CLAUDE.md
+.claude/

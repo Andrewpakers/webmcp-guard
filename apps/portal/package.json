@@ -1,0 +1,31 @@
+{
+  "name": "portal",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Lakeside Medical — the fictitious patient portal that demonstrates WebMCP Guard.",
+  "scripts": {
+    "dev": "next dev --port 3000",
+    "build": "next build",
+    "start": "next start --port 3000",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@webmcp-guard/sdk": "workspace:*",
+    "@webmcp-guard/server": "workspace:*",
+    "@webmcp-guard/shared": "workspace:*",
+    "@webmcp-guard/storage-memory": "workspace:*",
+    "@webmcp-guard/storage-sqlite": "workspace:*",
+    "next": "^15.5.24",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}

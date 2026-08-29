@@ -1,0 +1,26 @@
+{
+  "name": "@webmcp-guard/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Node runtime for WebMCP Guard: policy engine, classifiers, token vault, log writer, route handlers.",
+  "license": "MIT",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}
