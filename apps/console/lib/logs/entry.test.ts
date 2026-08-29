@@ -83,9 +83,9 @@ describe("displayVerdict", () => {
 
 describe("agentLabel", () => {
   it("prefers the best-effort agent id, with the browser as context", () => {
-    expect(agentLabel({ agentId: "chatgpt-atlas", browserBrand: "Chrome", browserVersion: "151" })).toBe(
-      "chatgpt-atlas · Chrome 151",
-    );
+    expect(
+      agentLabel({ agentId: "chatgpt-atlas", browserBrand: "Chrome", browserVersion: "151" }),
+    ).toBe("chatgpt-atlas · Chrome 151");
   });
 
   it("falls back to the browser, then to `unidentified`", () => {
@@ -116,9 +116,9 @@ describe("readJustification", () => {
   });
 
   it("reads the justification text", () => {
-    expect(readJustification({ justification: "Patient asked for a copy of their chart." })).toEqual(
-      { text: "Patient asked for a copy of their chart." },
-    );
+    expect(
+      readJustification({ justification: "Patient asked for a copy of their chart." }),
+    ).toEqual({ text: "Patient asked for a copy of their chart." });
   });
 
   it("reads an evaluator verdict in either shape (Phase 5 fields)", () => {

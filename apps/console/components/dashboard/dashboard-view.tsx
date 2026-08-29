@@ -65,7 +65,9 @@ export function DashboardView() {
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <h1 className="text-lg font-semibold tracking-tight text-slate-100">Dashboard</h1>
-          <p className="text-xs text-slate-400">Agent activity through this deployment, last 24 hours.</p>
+          <p className="text-xs text-slate-400">
+            Agent activity through this deployment, last 24 hours.
+          </p>
         </div>
         <button type="button" className="gc-btn" onClick={() => void load()} disabled={loading}>
           {loading ? "Loading…" : "Refresh"}

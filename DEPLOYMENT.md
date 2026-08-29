@@ -2,10 +2,10 @@
 
 Two deployments, per `docs/03-architecture.md`:
 
-| App | Host | Why |
-|---|---|---|
+| App                                                       | Host                         | Why                                                                                                           |
+| --------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | `apps/portal` (Lakeside Medical + the guard API + SQLite) | **Render**, Node web service | SQLite needs a long-lived process and a real filesystem; serverless filesystems are ephemeral per-invocation. |
-| `apps/console` (WebMCP Guard Console) | **Vercel** | Stateless client of the portal's guard API. |
+| `apps/console` (WebMCP Guard Console)                     | **Vercel**                   | Stateless client of the portal's guard API.                                                                   |
 
 ## 1. Portal → Render
 
@@ -18,7 +18,7 @@ Two deployments, per `docs/03-architecture.md`:
    `https://webmcp-guard-portal.onrender.com`) and verify:
    - `/patients` shows 60 seeded patients (seed-on-boot ran);
    - `/api/guard/policies` with `Authorization: Bearer <GUARD_ADMIN_TOKEN from
-     the dashboard>` returns the seeded policy.
+the dashboard>` returns the seeded policy.
 4. Copy `GUARD_ADMIN_TOKEN` from the service's environment tab — it is the
    console login credential and goes on the Devpost submission form.
 5. Free-tier instances sleep; either upgrade to the smallest paid instance for

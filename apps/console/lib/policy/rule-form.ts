@@ -74,7 +74,8 @@ export const ACTION_LABEL: Record<RuleActionType, string> = {
 export const ACTION_HINT: Record<RuleActionType, string> = {
   allow: "Let the call through and log it. Use to carve an exception out of a broader rule.",
   deny: "Refuse the call. The agent gets your message instead of a result.",
-  "require-confirmation": "The human approves in-page before the tool runs. One-time id, no replay.",
+  "require-confirmation":
+    "The human approves in-page before the tool runs. One-time id, no replay.",
   "require-justification": "The agent must state why. Optionally evaluated before the call runs.",
   transform: "Let the call run, then rewrite the result per data class before the agent sees it.",
 };
@@ -195,9 +196,7 @@ export function formToAction(form: RuleFormState): RuleAction {
   }
 }
 
-export type RuleFormResult =
-  | { ok: true; rule: Rule }
-  | { ok: false; errors: string[] };
+export type RuleFormResult = { ok: true; rule: Rule } | { ok: false; errors: string[] };
 
 /**
  * Validates the whole builder against the shared schema. `priorityFallback` is

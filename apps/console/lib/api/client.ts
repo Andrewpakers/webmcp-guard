@@ -35,9 +35,7 @@ export const GUARD_ERROR_CODES = [
 export type GuardErrorCode = (typeof GUARD_ERROR_CODES)[number];
 
 function isGuardErrorCode(value: unknown): value is GuardErrorCode {
-  return (
-    typeof value === "string" && (GUARD_ERROR_CODES as readonly string[]).includes(value)
-  );
+  return typeof value === "string" && (GUARD_ERROR_CODES as readonly string[]).includes(value);
 }
 
 /** Every failure the console can render, with a message safe to show as-is. */
@@ -149,9 +147,7 @@ export async function guardRequest<T>(
   };
 
   if (token === null || token.length === 0) {
-    return fail(
-      new GuardApiError("no_token", "Not connected. Enter the admin token to continue."),
-    );
+    return fail(new GuardApiError("no_token", "Not connected. Enter the admin token to continue."));
   }
 
   const method = options.method ?? "GET";

@@ -90,9 +90,7 @@ describe("topTools", () => {
 
 describe("statCards", () => {
   it("reports the four dashboard counters in order", () => {
-    const cards = statCards(
-      stats({ totalCalls: 31, denied: 4, transformed: 12, uniqueAgents: 2 }),
-    );
+    const cards = statCards(stats({ totalCalls: 31, denied: 4, transformed: 12, uniqueAgents: 2 }));
     expect(cards.map((card) => [card.key, card.value])).toEqual([
       ["calls", 31],
       ["denied", 4],

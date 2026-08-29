@@ -144,10 +144,9 @@ async function evalInPage(cdp, expression) {
 try {
   await waitForCdp();
   // Create a page target and connect to it.
-  const target = await fetchJson(
-    `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
-    { method: "PUT" },
-  );
+  const target = await fetchJson(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`, {
+    method: "PUT",
+  });
   const cdp = await connect(target.webSocketDebuggerUrl);
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");

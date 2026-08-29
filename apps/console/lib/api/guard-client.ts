@@ -11,12 +11,7 @@ import type {
   StatsRange,
 } from "@webmcp-guard/shared";
 
-import {
-  GuardApiError,
-  guardRequest,
-  type GuardTransportConfig,
-  type QueryValue,
-} from "./client";
+import { GuardApiError, guardRequest, type GuardTransportConfig, type QueryValue } from "./client";
 
 /**
  * The typed surface of `packages/server/src/server.ts`, one method per route.
@@ -120,7 +115,11 @@ export function createGuardClient(config: GuardTransportConfig): GuardClient {
       request<PolicyDocument>({ method: "POST", path: "/policies/reorder", body: { ids } }),
 
     setDefaultAction: (action) =>
-      request<PolicyDocument>({ method: "PUT", path: "/policies", body: { defaultAction: action } }),
+      request<PolicyDocument>({
+        method: "PUT",
+        path: "/policies",
+        body: { defaultAction: action },
+      }),
 
     queryLogs: (query, signal) =>
       request<LogPage>({ path: "/logs", query: logQueryParams(query), signal }),

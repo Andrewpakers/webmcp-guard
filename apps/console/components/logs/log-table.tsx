@@ -141,7 +141,15 @@ function Th({ children, className = "" }: { children: React.ReactNode; className
   );
 }
 
-function Td({ children, className = "", title }: { children: React.ReactNode; className?: string; title?: string }) {
+function Td({
+  children,
+  className = "",
+  title,
+}: {
+  children: React.ReactNode;
+  className?: string;
+  title?: string;
+}) {
   return (
     <td className={`px-3 py-1.5 align-top ${className}`} title={title}>
       {children}

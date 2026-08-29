@@ -25,9 +25,7 @@ export function Panel({
             {title !== undefined && (
               <h2 className="text-sm font-semibold text-slate-100">{title}</h2>
             )}
-            {subtitle !== undefined && (
-              <p className="mt-0.5 text-xs text-slate-400">{subtitle}</p>
-            )}
+            {subtitle !== undefined && <p className="mt-0.5 text-xs text-slate-400">{subtitle}</p>}
           </div>
           {actions !== undefined && <div className="flex items-center gap-2">{actions}</div>}
         </header>

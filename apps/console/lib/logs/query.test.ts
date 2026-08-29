@@ -57,7 +57,9 @@ describe("logFiltersToQuery", () => {
     expect(logFiltersToQuery(EMPTY_LOG_FILTERS, { offset: 50, cursor: "abc" })).toMatchObject({
       cursor: "abc",
     });
-    expect(logFiltersToQuery(EMPTY_LOG_FILTERS, { offset: 50, cursor: "abc" }).offset).toBeUndefined();
+    expect(
+      logFiltersToQuery(EMPTY_LOG_FILTERS, { offset: 50, cursor: "abc" }).offset,
+    ).toBeUndefined();
   });
 
   it("produces the query string GET /logs actually parses", () => {

@@ -120,8 +120,8 @@ export function RuleEditor({
         <div className="space-y-2">
           <p className="text-xs text-slate-400">
             The escape hatch. Validated against the shared{" "}
-            <span className="font-mono">RuleSchema</span> — the same zod schema the server enforces —
-            before it replaces the builder&rsquo;s state.
+            <span className="font-mono">RuleSchema</span> — the same zod schema the server enforces
+            — before it replaces the builder&rsquo;s state.
           </p>
           <textarea
             aria-label="Rule JSON"

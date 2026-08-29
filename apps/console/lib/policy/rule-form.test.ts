@@ -115,7 +115,12 @@ describe("formToMatch", () => {
   });
 
   it("only emits the tool matcher the selected kind refers to", () => {
-    const form = { ...emptyRuleForm(), toolNames: ["a"], toolTags: ["b"], toolKind: "tags" as const };
+    const form = {
+      ...emptyRuleForm(),
+      toolNames: ["a"],
+      toolTags: ["b"],
+      toolKind: "tags" as const,
+    };
     expect(formToMatch(form)).toEqual({ tools: { tags: ["b"] } });
     expect(formToMatch({ ...form, toolKind: "names" })).toEqual({ tools: ["a"] });
     expect(formToMatch({ ...form, toolKind: "any" })).toEqual({});
@@ -221,7 +226,14 @@ describe("JSON escape hatch", () => {
 
   it("reports schema failures with their field path", () => {
     const result = parseRuleJson(
-      JSON.stringify({ id: "x", name: "x", enabled: true, priority: 1, match: {}, action: { type: "nope" } }),
+      JSON.stringify({
+        id: "x",
+        name: "x",
+        enabled: true,
+        priority: 1,
+        match: {},
+        action: { type: "nope" },
+      }),
     );
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors.join(" ")).toMatch(/action/);

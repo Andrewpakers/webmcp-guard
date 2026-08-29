@@ -126,7 +126,10 @@ describe("guardRequest", () => {
     const onUnauthorized = vi.fn();
 
     await expect(
-      guardRequest({ baseUrl: BASE, token: "stale", fetchImpl: impl, onUnauthorized }, { path: "/logs" }),
+      guardRequest(
+        { baseUrl: BASE, token: "stale", fetchImpl: impl, onUnauthorized },
+        { path: "/logs" },
+      ),
     ).rejects.toBeInstanceOf(GuardApiError);
 
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
@@ -138,7 +141,10 @@ describe("guardRequest", () => {
     const onUnauthorized = vi.fn();
 
     await expect(
-      guardRequest({ baseUrl: BASE, token: "stale", fetchImpl: impl, onUnauthorized }, { path: "/logs" }),
+      guardRequest(
+        { baseUrl: BASE, token: "stale", fetchImpl: impl, onUnauthorized },
+        { path: "/logs" },
+      ),
     ).rejects.toMatchObject({ code: "unauthorized", status: 401 });
     expect(onUnauthorized).toHaveBeenCalledTimes(1);
   });
@@ -148,7 +154,10 @@ describe("guardRequest", () => {
     const onUnauthorized = vi.fn();
 
     await expect(
-      guardRequest({ baseUrl: BASE, token: null, fetchImpl: impl, onUnauthorized }, { path: "/logs" }),
+      guardRequest(
+        { baseUrl: BASE, token: null, fetchImpl: impl, onUnauthorized },
+        { path: "/logs" },
+      ),
     ).rejects.toMatchObject({ code: "no_token" });
 
     expect(calls).toHaveLength(0);

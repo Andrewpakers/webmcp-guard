@@ -54,7 +54,10 @@ export function LogDrawer({ entry, onClose }: { entry: LogRecord; onClose: () =>
 
   const verdict = displayVerdict(entry);
   const justification = readJustification(entry);
-  const posture = { agent: entry.agent, ...(entry.session === undefined ? {} : { session: entry.session }) };
+  const posture = {
+    agent: entry.agent,
+    ...(entry.session === undefined ? {} : { session: entry.session }),
+  };
 
   return (
     <aside

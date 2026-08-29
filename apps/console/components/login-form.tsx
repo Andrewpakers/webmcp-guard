@@ -49,8 +49,8 @@ export function LoginForm() {
         <p className="gc-label text-indigo-300">WebMCP Guard</p>
         <h1 className="mt-1 text-2xl font-semibold tracking-tight text-slate-50">{SITE.name}</h1>
         <p className="mt-2 text-sm text-slate-400">
-          Policy, posture and the audit trail for the agent channel. Connect with the deployment&rsquo;s
-          admin token to continue.
+          Policy, posture and the audit trail for the agent channel. Connect with the
+          deployment&rsquo;s admin token to continue.
         </p>
       </div>
 

@@ -40,9 +40,7 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
         <div className="mx-auto flex max-w-[110rem] flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2.5">
           <Link href="/logs" className="flex items-center gap-2">
             <ShieldMark />
-            <span className="text-sm font-semibold tracking-tight text-slate-100">
-              {SITE.name}
-            </span>
+            <span className="text-sm font-semibold tracking-tight text-slate-100">{SITE.name}</span>
           </Link>
 
           <div className="ml-auto flex flex-wrap items-center gap-x-4 gap-y-1 text-[0.6875rem]">

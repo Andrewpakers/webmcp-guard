@@ -1,4 +1,9 @@
-import { DATA_CLASSES, TRANSFORM_ACTIONS, type DataClass, type TransformAction } from "@webmcp-guard/shared";
+import {
+  DATA_CLASSES,
+  TRANSFORM_ACTIONS,
+  type DataClass,
+  type TransformAction,
+} from "@webmcp-guard/shared";
 
 /**
  * Read-only reference copy for the settings page and the transform matrix,

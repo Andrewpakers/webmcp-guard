@@ -161,7 +161,12 @@ describe("createGuardClient", () => {
   it("still bounces the session when the reveal is unauthorized", async () => {
     const onUnauthorized = vi.fn();
     const { impl } = recorder(() => fail("unauthorized", 401));
-    const client = createGuardClient({ baseUrl: BASE, token: "t", fetchImpl: impl, onUnauthorized });
+    const client = createGuardClient({
+      baseUrl: BASE,
+      token: "t",
+      fetchImpl: impl,
+      onUnauthorized,
+    });
 
     await expect(client.revealLog("call-1")).resolves.toMatchObject({ logged: false });
     expect(onUnauthorized).toHaveBeenCalledTimes(1);

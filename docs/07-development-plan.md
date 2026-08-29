@@ -207,13 +207,19 @@ suite green).
 
 ## Phase 7 — Polish, deploy, submit
 
-- [ ] Root README: pitch, architecture diagram, threat model summary,
+- [x] Root README: pitch, architecture diagram, threat model summary,
       `registerTool` excerpt, quickstart verified from a clean clone,
-      screenshots
-- [ ] `packages/sdk/README.md`: 15-minute integration guide (written so an
+      screenshots _(quickstart re-verified from a fresh `git clone` on ports
+      4000/4001: `pnpm install` + `pnpm test` → 54 files / 1139 green, both
+      apps boot, seed-on-boot produced 60 patients and the 6 default rules.
+      **Correction found and documented:** the console needs
+      `GUARD_CONSOLE_ORIGIN` set or its cross-origin calls get no CORS headers,
+      so the quickstart now says `cp .env.example apps/portal/.env.local` and
+      names both possible admin tokens)_
+- [x] `packages/sdk/README.md`: 15-minute integration guide (written so an
       agent could follow it)
-- [ ] Deploy portal to Render (seed-on-boot verified; note/mitigate free-tier
-      cold starts); deploy console to Vercel; envs set; CORS verified
+- [ ] Deploy portal to Render (seed-on-boot verified **locally**; note/mitigate
+      free-tier cold starts); deploy console to Vercel; envs set; CORS verified
 - [ ] Full demo-path rehearsal (docs/05 script) in **ChatGPT in-app browser**
       and Chrome+flag against the live URLs
 - [ ] Record + edit demo video (< 3 min, audio) per `09-demo-and-submission.md`;

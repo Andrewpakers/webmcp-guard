@@ -115,8 +115,8 @@ export function PoliciesView() {
         <div>
           <h1 className="text-lg font-semibold tracking-tight text-slate-100">Policies</h1>
           <p className="text-xs text-slate-400">
-            Ordered rules, lowest priority first. The first match per aspect wins — one gate verdict,
-            one transform matrix.
+            Ordered rules, lowest priority first. The first match per aspect wins — one gate
+            verdict, one transform matrix.
           </p>
         </div>
         <button
@@ -134,8 +134,8 @@ export function PoliciesView() {
       </div>
 
       <p className="rounded-md border border-indigo-900/60 bg-indigo-950/40 px-3 py-2 text-xs text-indigo-200">
-        {LIVE_POLICY_NOTICE} The SDK re-reads policy per call, so a toggle here changes the very next
-        thing the agent tries.
+        {LIVE_POLICY_NOTICE} The SDK re-reads policy per call, so a toggle here changes the very
+        next thing the agent tries.
       </p>
 
       {error !== null && <ErrorNote message={error} onRetry={() => void load()} />}

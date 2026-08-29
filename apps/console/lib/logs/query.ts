@@ -78,10 +78,7 @@ export interface LogPageState {
  * are omitted entirely rather than sent blank, so the shape of the request
  * mirrors what the operator actually narrowed by.
  */
-export function logFiltersToQuery(
-  filters: LogFilterState,
-  page: LogPageState = {},
-): LogQuery {
+export function logFiltersToQuery(filters: LogFilterState, page: LogPageState = {}): LogQuery {
   const tool = filters.tool.trim();
   const agent = filters.agent.trim();
   const since = datetimeLocalToIso(filters.since);

@@ -17,7 +17,8 @@ import {
  */
 
 const COLUMN_TINT: Record<TransformAction, string> = {
-  tokenize: "peer-checked:border-cyan-400/70 peer-checked:bg-cyan-500/20 peer-checked:text-cyan-200",
+  tokenize:
+    "peer-checked:border-cyan-400/70 peer-checked:bg-cyan-500/20 peer-checked:text-cyan-200",
   mask: "peer-checked:border-indigo-400/70 peer-checked:bg-indigo-500/20 peer-checked:text-indigo-200",
   contextualize:
     "peer-checked:border-amber-400/70 peer-checked:bg-amber-500/20 peer-checked:text-amber-200",
@@ -69,7 +70,10 @@ export function TransformMatrix({
         </thead>
         <tbody>
           {DATA_CLASS_REFERENCE.map((entry) => (
-            <tr key={entry.dataClass} className="border-b border-slate-900 last:border-0 hover:bg-slate-800/30">
+            <tr
+              key={entry.dataClass}
+              className="border-b border-slate-900 last:border-0 hover:bg-slate-800/30"
+            >
               <th scope="row" className="px-3 py-1.5 text-left font-normal">
                 <span className="font-mono text-slate-200">{entry.dataClass}</span>
                 <span className="ml-2 text-slate-500">{entry.label}</span>

@@ -136,9 +136,15 @@ export function SettingsView() {
           <table className="w-full min-w-[46rem] border-collapse text-left text-xs">
             <thead>
               <tr className="border-b border-slate-800 text-slate-500">
-                <th scope="col" className="gc-label px-4 py-2">Class</th>
-                <th scope="col" className="gc-label px-3 py-2">Detected by</th>
-                <th scope="col" className="gc-label px-3 py-2">Example</th>
+                <th scope="col" className="gc-label px-4 py-2">
+                  Class
+                </th>
+                <th scope="col" className="gc-label px-3 py-2">
+                  Detected by
+                </th>
+                <th scope="col" className="gc-label px-3 py-2">
+                  Example
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -149,7 +155,9 @@ export function SettingsView() {
                     <span className="ml-2 text-slate-500">{entry.label}</span>
                   </td>
                   <td className="px-3 py-1.5 align-top text-slate-400">{entry.description}</td>
-                  <td className="px-3 py-1.5 align-top font-mono text-slate-500">{entry.example}</td>
+                  <td className="px-3 py-1.5 align-top font-mono text-slate-500">
+                    {entry.example}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -234,8 +242,8 @@ export function SettingsView() {
       >
         {evaluatorRules.length === 0 ? (
           <EmptyState title="No rule requests LLM evaluation">
-            Turn on “evaluate with the LLM evaluator” on a require-justification rule to use it. With
-            no LLM_API_KEY configured the server falls back to the heuristic evaluator.
+            Turn on “evaluate with the LLM evaluator” on a require-justification rule to use it.
+            With no LLM_API_KEY configured the server falls back to the heuristic evaluator.
           </EmptyState>
         ) : (
           <ul className="divide-y divide-slate-900 text-xs">

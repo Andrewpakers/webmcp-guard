@@ -9,7 +9,9 @@ import {
   type TokenStore,
 } from "./session";
 
-function fakeStore(initial: Record<string, string> = {}): TokenStore & { data: Record<string, string> } {
+function fakeStore(
+  initial: Record<string, string> = {},
+): TokenStore & { data: Record<string, string> } {
   const data = { ...initial };
   return {
     data,

@@ -74,10 +74,20 @@ function DarkTooltip({ active, payload, label }: TooltipContentProps) {
 export function CallsByVerdictChart({ data }: { data: VerdictDayPoint[] }) {
   return (
     <ChartFrame height={220}>
-      <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: -18 }} barCategoryGap="28%">
+      <BarChart
+        data={data}
+        margin={{ top: 8, right: 8, bottom: 0, left: -18 }}
+        barCategoryGap="28%"
+      >
         <CartesianGrid stroke={CHART_COLORS.grid} vertical={false} />
         <XAxis dataKey="label" tick={AXIS_TICK} tickLine={false} axisLine={false} />
-        <YAxis tick={AXIS_TICK} tickLine={false} axisLine={false} allowDecimals={false} width={44} />
+        <YAxis
+          tick={AXIS_TICK}
+          tickLine={false}
+          axisLine={false}
+          allowDecimals={false}
+          width={44}
+        />
         <Tooltip content={DarkTooltip} cursor={{ fill: "rgb(148 163 184 / 0.08)" }} />
         <Legend
           iconType="square"
