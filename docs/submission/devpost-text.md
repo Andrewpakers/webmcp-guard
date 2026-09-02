@@ -63,18 +63,19 @@ Alternates if a sixth slot is available: `docs/captures/console/dashboard.png` (
 
 ```
 Portal (Lakeside Medical) — the app judges should open in a WebMCP browser:
-  URL:   TODO-until-deploy
+  URL:   https://webmcp-guard-portal.onrender.com/patients
   Login: none required. Use the persona switcher in the header to change role
          (Dr. Alicia Reyes / physician, Nurse Chidi Okafor / nursing,
          Sam Levin / billing). Mock identities only — no passwords, no SSO.
 
 WebMCP Guard Console — the admin view of the same deployment:
-  URL:   TODO-until-deploy
+  URL:   https://webmcp-guard-console.vercel.app
   Login: paste the admin token on the connect screen.
-  Admin token: TODO-until-deploy   (the deployment's GUARD_ADMIN_TOKEN)
+  Admin token: TODO-paste-from-render   (the deployment's GUARD_ADMIN_TOKEN —
+               Render dashboard -> webmcp-guard-portal -> Environment)
 
-Repository: TODO-until-deploy  (public, MIT, LICENSE at root)
-Demo video: TODO-until-deploy  (public YouTube, under 3:00, with audio)
+Repository: https://github.com/Andrewpakers/webmcp-guard  (make public before submitting)
+Demo video: TODO-until-video  (public YouTube, under 3:00, with audio)
 
 To enable WebMCP: Google Chrome 149+ with chrome://flags/#enable-webmcp-testing
 enabled and a full relaunch, or open the portal in ChatGPT's in-app browser.

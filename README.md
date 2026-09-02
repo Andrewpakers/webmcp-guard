@@ -274,13 +274,13 @@ Building against a browser API this new means the spec and the implementation so
 
 ## Deployed URLs
 
-> **TODO until deploy.** These are placeholders. See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the Render (portal) + Vercel (console) procedure and [`render.yaml`](render.yaml) for the blueprint.
+| What                    | URL                                                                                        | Credentials                                            |
+| ----------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
+| Lakeside Medical portal | [webmcp-guard-portal.onrender.com/patients](https://webmcp-guard-portal.onrender.com/patients) | No login; switch persona in the header                 |
+| WebMCP Guard Console    | [webmcp-guard-console.vercel.app](https://webmcp-guard-console.vercel.app)                 | Admin token: provided on the Devpost submission form   |
+| Demo video              | `TODO-until-video`                                                                         | —                                                      |
 
-| What                    | URL                 | Credentials                            |
-| ----------------------- | ------------------- | -------------------------------------- |
-| Lakeside Medical portal | `TODO-until-deploy` | No login; switch persona in the header |
-| WebMCP Guard Console    | `TODO-until-deploy` | Admin token: `TODO-until-deploy`       |
-| Demo video              | `TODO-until-deploy` | —                                      |
+Deploy procedure: [`DEPLOYMENT.md`](DEPLOYMENT.md) + [`render.yaml`](render.yaml).
 
 The portal runs on a free Render instance, which sleeps when idle: the first request after a period of inactivity can take roughly a minute to wake. The disk is ephemeral across restarts, and that is fine — schema, demo patients and the default policy are all seeded on boot.
 
