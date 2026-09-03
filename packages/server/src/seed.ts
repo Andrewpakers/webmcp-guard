@@ -78,6 +78,30 @@ export const DEFAULT_POLICY_RULES: RuleDraft[] = [
   },
   {
     /**
+     * Provider blocking, as a worked example: identity is the best-effort UA/
+     * brand marker from the SDK's posture snapshot (spoofable — this is
+     * governance of well-behaved agents, not authentication). A Claude agent
+     * driving a stock browser leaves no marker and is instead caught by
+     * `posture-deny-unknown-agent`; the two rules together are the honest
+     * "allowlist known providers" story.
+     */
+    id: "posture-deny-claude-agents",
+    name: "Posture: block Claude agents (provider demo)",
+    enabled: false,
+    priority: 7,
+    match: {
+      agents: [{ kind: "agent", id: "claude" }],
+    },
+    action: {
+      type: "deny",
+      message:
+        "This organization does not permit Claude agents on this application, so the call was " +
+        "not executed. Ask the person using this page to perform the action in the portal " +
+        "themselves, and tell them Claude access is blocked by policy.",
+    },
+  },
+  {
+    /**
      * Role-scoped data control (`docs/07` Phase 6): the billing desk can look a
      * patient up, but has no business reading what the clinician wrote.
      *

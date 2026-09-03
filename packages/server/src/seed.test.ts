@@ -13,6 +13,7 @@ import { DEFAULT_POLICY_RULES, seedDefaultPolicy } from "./seed";
 const SEEDED_IDS = [
   "posture-deny-unknown-agent",
   "posture-deny-old-browser",
+  "posture-deny-claude-agents",
   "role-billing-notes-masked",
   "phi-transform-default",
   "export-requires-justification",
@@ -44,6 +45,7 @@ describe("DEFAULT_POLICY_RULES", () => {
     expect(enabled).toEqual({
       "posture-deny-unknown-agent": false,
       "posture-deny-old-browser": false,
+      "posture-deny-claude-agents": false,
       "role-billing-notes-masked": true,
       "phi-transform-default": true,
       "export-requires-justification": true,
@@ -60,6 +62,7 @@ describe("DEFAULT_POLICY_RULES", () => {
     expect(posture.map((rule) => rule.id)).toEqual([
       "posture-deny-unknown-agent",
       "posture-deny-old-browser",
+      "posture-deny-claude-agents",
     ]);
   });
 
@@ -216,6 +219,31 @@ describe("DEFAULT_POLICY_RULES", () => {
 
     expect(decision.verdict).toBe("deny");
     expect(decision.gateRule?.id).toBe("posture-deny-old-browser");
+  });
+
+  it("blocks an identified Claude agent through the provider rule, and nobody else", async () => {
+    const storage = memoryStorage();
+    await seedDefaultPolicy(storage);
+    await storage.updateRule("posture-deny-claude-agents", { enabled: true });
+    const policy = await storage.getPolicy();
+
+    const call = { app: "lakeside-portal", tool: "search_patients", toolTags: ["read", "phi"] };
+    const posture = { isSecureContext: true, timestamp: "2026-09-02T12:00:00.000Z" };
+
+    const claude = resolvePolicy(policy, { ...call, posture: { ...posture, agentId: "claude" } });
+    expect(claude.verdict).toBe("deny");
+    expect(claude.gateRule?.id).toBe("posture-deny-claude-agents");
+
+    // A different identified provider sails past the provider block.
+    const chatgpt = resolvePolicy(policy, {
+      ...call,
+      posture: { ...posture, agentId: "chatgpt-inapp" },
+    });
+    expect(chatgpt.verdict).toBe("allow");
+
+    // An unidentified agent is the deny-unknown rule's job, not this one's —
+    // and that rule is still disabled here.
+    expect(resolvePolicy(policy, { ...call, posture }).verdict).toBe("allow");
   });
 });
 

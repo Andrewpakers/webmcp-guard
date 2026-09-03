@@ -40,9 +40,10 @@ export interface RuleFormState {
   roles: string[];
   dataClasses: DataClass[];
   /**
-   * Posture matchers are round-tripped untouched and shown read-only: the
-   * policy engine treats them as inert until Phase 5, so an editor for them
-   * would promise enforcement that does not exist yet.
+   * Agent/posture matchers are round-tripped untouched and shown read-only in
+   * the builder; the JSON view edits them. The engine enforces them (Phase 5):
+   * unknown-agent, agent-id, and browser brand/version-range matching. A
+   * structured builder UI for the three matcher kinds is future work.
    */
   agents: AgentMatcher[] | null;
   // THEN

@@ -237,7 +237,7 @@ export function RuleEditor({
 
             <Labelled
               label="Agent matchers"
-              hint="Read-only: posture matchers land in Phase 5, and the engine treats them as inert until then."
+              hint="Enforced by the engine (unknown / agent id / browser + version range). The builder shows them read-only — edit them in the JSON view."
             >
               <pre className="gc-json max-h-32">
                 {form.agents === null ? "— none —" : JSON.stringify(form.agents, null, 2)}

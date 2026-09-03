@@ -203,7 +203,7 @@ export function SettingsView() {
 
       <Panel
         title="Posture rule pack"
-        subtitle="Phase 5 — posture matchers are inert until the engine ships them, so these ship disabled."
+        subtitle="Enforced when enabled. These ship disabled so an unrecognized judge environment is never blocked by default — posture signals are advisory and spoofable."
       >
         {postureRules.length === 0 ? (
           <EmptyState title="No posture rules in this policy">

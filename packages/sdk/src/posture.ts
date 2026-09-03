@@ -52,6 +52,11 @@ function readBrands(value: unknown): Array<{ brand: string; version: string }> |
 export const AGENT_UA_MARKERS: readonly { marker: string; id: string }[] = [
   { marker: "atlas", id: "chatgpt-atlas" },
   { marker: "chatgpt", id: "chatgpt-inapp" },
+  // Any Claude-branded surface (a Claude browser UA or a "Claude" Client-Hints
+  // brand). An agent driving a stock browser (e.g. a Chrome extension) leaves
+  // no marker at all and shows up as "unknown" — which is exactly what the
+  // deny-unknown-agent posture rule is for.
+  { marker: "claude", id: "claude" },
 ];
 
 /**

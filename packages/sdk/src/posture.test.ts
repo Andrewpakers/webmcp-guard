@@ -172,7 +172,19 @@ describe("collectPostureSnapshot", () => {
       });
       expect(collectPostureSnapshot().agentId).toBe("chatgpt-atlas");
       // The order of the marker list is what makes that true.
-      expect(AGENT_UA_MARKERS.map((entry) => entry.id)).toEqual(["chatgpt-atlas", "chatgpt-inapp"]);
+      expect(AGENT_UA_MARKERS.map((entry) => entry.id)).toEqual([
+        "chatgpt-atlas",
+        "chatgpt-inapp",
+        "claude",
+      ]);
+    });
+
+    it("recognises a Claude-branded surface by UA or Client-Hints brand", () => {
+      expect(guessAgentId("Mozilla/5.0 … Claude/1.0 …", undefined)).toBe("claude");
+      expect(guessAgentId(undefined, [{ brand: "Claude" }, { brand: "Chromium" }])).toBe("claude");
+      // An agent driving a stock browser leaves no marker: that is "unknown",
+      // and the deny-unknown-agent posture rule is what covers it.
+      expect(guessAgentId("Mozilla/5.0 (Macintosh) Chrome/152.0.0.0", undefined)).toBeUndefined();
     });
 
     it("matches case-insensitively and reads Client-Hints brands too", () => {
