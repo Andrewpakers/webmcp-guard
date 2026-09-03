@@ -5,6 +5,7 @@ import {
   clearStoredToken,
   maskToken,
   readStoredToken,
+  readTokenParam,
   storeToken,
   type TokenStore,
 } from "./session";
@@ -77,5 +78,25 @@ describe("maskToken", () => {
 
   it("shows nothing at all of a short one", () => {
     expect(maskToken("shortie")).toBe("•••••••");
+  });
+});
+
+describe("readTokenParam", () => {
+  it("extracts and trims the token and strips it from the query", () => {
+    const r = readTokenParam("?token=%20abc123%3D%20&filter=deny");
+    expect(r.token).toBe("abc123=");
+    expect(r.cleanedSearch).toBe("?filter=deny");
+  });
+
+  it("keeps a base64 trailing = intact when sent unencoded", () => {
+    const r = readTokenParam("?token=Nit52abc=");
+    expect(r.token).toBe("Nit52abc=");
+    expect(r.cleanedSearch).toBe("");
+  });
+
+  it("returns null for an absent or empty token", () => {
+    expect(readTokenParam("").token).toBeNull();
+    expect(readTokenParam("?token=").token).toBeNull();
+    expect(readTokenParam("?other=1").token).toBeNull();
   });
 });

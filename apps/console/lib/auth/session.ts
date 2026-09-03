@@ -63,3 +63,25 @@ export function maskToken(token: string): string {
   if (token.length <= 10) return "•".repeat(token.length);
   return `${token.slice(0, 4)}…${token.slice(-3)}`;
 }
+
+/**
+ * Auto-login links: `/login?token=<admin token>`.
+ *
+ * The demo deployment's token is deliberately public (synthetic data only),
+ * so a shareable link that signs the viewer straight in is a fair trade. The
+ * caller must still scrub the parameter from the address bar before using the
+ * token — links get copied, and the cleaned URL is what should be re-shared.
+ */
+export function readTokenParam(search: string): { token: string | null; cleanedSearch: string } {
+  let params: URLSearchParams;
+  try {
+    params = new URLSearchParams(search);
+  } catch {
+    return { token: null, cleanedSearch: search };
+  }
+  const raw = params.get("token");
+  const token = raw === null || raw.trim().length === 0 ? null : raw.trim();
+  params.delete("token");
+  const rest = params.toString();
+  return { token, cleanedSearch: rest.length === 0 ? "" : `?${rest}` };
+}

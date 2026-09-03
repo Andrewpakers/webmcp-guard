@@ -1,9 +1,10 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { useAuth } from "@/components/auth-provider";
+import { readTokenParam } from "@/lib/auth/session";
 import { SITE } from "@/lib/site";
 
 /**
@@ -26,6 +27,31 @@ export function LoginForm() {
   useEffect(() => {
     if (status === "connected") router.replace("/logs");
   }, [status, router]);
+
+  /**
+   * Auto-login links: `/login?token=…`. The token is scrubbed from the address
+   * bar FIRST — links get copied and screens get shared — then validated the
+   * same way a typed token is. One attempt per page load (StrictMode-safe).
+   */
+  const autoAttempted = useRef(false);
+  useEffect(() => {
+    if (autoAttempted.current || status === "connected") return;
+    const { token: provided, cleanedSearch } = readTokenParam(window.location.search);
+    if (provided === null) return;
+    autoAttempted.current = true;
+
+    window.history.replaceState(null, "", window.location.pathname + cleanedSearch);
+    setToken(provided);
+    setBusy(true);
+    void connect(provided).then((result) => {
+      setBusy(false);
+      if (result.ok) {
+        router.replace("/logs");
+        return;
+      }
+      setError(result.error ?? "Could not connect with the token from the link.");
+    });
+  }, [status, connect, router]);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
