@@ -44,7 +44,7 @@ export function RuleRow({
       id={rule.id}
       className={`gc-card scroll-mt-28 transition-colors ${
         highlighted ? "border-indigo-500/70 ring-1 ring-indigo-500/40" : ""
-      } ${rule.enabled ? "" : "opacity-60"}`}
+      }`}
     >
       <div className="flex flex-wrap items-start gap-3 px-3 py-2.5">
         <div className="flex flex-col items-center gap-0.5 pt-0.5">
@@ -77,6 +77,14 @@ export function RuleRow({
             <span className={`gc-badge ${ACTION_BADGE[rule.action.type]}`}>
               {ACTION_LABEL[rule.action.type]}
             </span>
+            {!rule.enabled && (
+              <span
+                className="gc-badge border-slate-600/50 bg-slate-700/30 text-slate-400"
+                title="This rule is fully editable — it just isn't enforced until the toggle is on."
+              >
+                off — not enforced
+              </span>
+            )}
             <span className="font-mono text-[0.6875rem] text-slate-500">{rule.id}</span>
           </div>
 
