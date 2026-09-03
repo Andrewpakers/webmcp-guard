@@ -44,6 +44,10 @@ import type { Tokenizer } from "./tokenize";
  *    no contextualizer (or a value the contextualizer cannot parse) is
  *    tokenized instead of being passed through. Failing open here would turn a
  *    misconfigured policy into a data leak.
+ * 4. **A span tokenizes its identity, not its text.** A dictionary hit that
+ *    resolved to a fuller value (`Span.identity` — a bare "Tricia" standing for
+ *    "Tricia Bashirian") is hashed as that value, so one person has one token
+ *    however their name happens to be written in a note.
  */
 
 /** Generic redaction glyph for classes with no digit-preserving convention. */
@@ -61,6 +65,12 @@ export interface TransformOptions {
   now?: Date;
 }
 
+/**
+ * The mechanisms reported in {@link TransformOutcome.actionsApplied}, in the
+ * order the agent-facing notice explains them.
+ */
+const MECHANISMS = ["tokenize", "mask", "contextualize"] as const;
+
 export interface TransformOutcome {
   /** The copy the agent receives. */
   result: unknown;
@@ -72,6 +82,19 @@ export interface TransformOutcome {
    * whole module synchronous and pure.
    */
   vaultEntries: VaultEntry[];
+  /**
+   * The mechanisms that **actually replaced something**, in `MECHANISMS` order.
+   * Empty means the agent is holding a byte-identical copy of what the tool
+   * returned.
+   *
+   * "Actually" is literal: an action is only recorded when its output differs
+   * from its input, so `contextualize` on a `city` field — which keeps the city
+   * — does not count, and a matched-but-inert policy produces an empty list.
+   * `/transform` uses this to decide whether the result needs a privacy notice
+   * and which mechanisms that notice should explain; a passthrough result stays
+   * clean, prose included.
+   */
+  actionsApplied: TransformAction[];
 }
 
 /** Classifies `value` and applies the matrix to it. */
@@ -81,15 +104,17 @@ export function transformValue(value: unknown, options: TransformOptions): Trans
   if (options.perClass === null) {
     // Classification still happened — the audit log records what was in the
     // payload even when policy chose to let it through untouched.
-    return { result: value, classesFound: classes, vaultEntries: [] };
+    return { result: value, classesFound: classes, vaultEntries: [], actionsApplied: [] };
   }
 
   const vaultEntries: VaultEntry[] = [];
   const seen = new Set<string>();
+  const applied = new Set<TransformAction>();
   const context: ApplyContext = {
     perClass: options.perClass,
     tokenizer: options.tokenizer,
     now: options.now ?? new Date(),
+    applied,
     emit(entry) {
       if (seen.has(entry.token)) return;
       seen.add(entry.token);
@@ -97,13 +122,22 @@ export function transformValue(value: unknown, options: TransformOptions): Trans
     },
   };
 
-  return { result: transformNode(root, context), classesFound: classes, vaultEntries };
+  const result = transformNode(root, context);
+
+  return {
+    result,
+    classesFound: classes,
+    vaultEntries,
+    actionsApplied: MECHANISMS.filter((mechanism) => applied.has(mechanism)),
+  };
 }
 
 interface ApplyContext {
   perClass: PerClassTransform;
   tokenizer: Tokenizer;
   now: Date;
+  /** Mechanisms that have replaced at least one value so far. */
+  applied: Set<TransformAction>;
   emit: (entry: VaultEntry) => void;
 }
 
@@ -184,15 +218,24 @@ function applyAction(
   context: ApplyContext,
   span?: Span,
 ): string {
+  /**
+   * What this text *is*, as opposed to how it was written here. For a bare
+   * dictionary hit that is the person's full name; for everything else it is
+   * the text itself. Only tokenization uses it — masking and generalizing
+   * describe the text on the page, but a token asserts an identity, and the
+   * identity of "Tricia" in a note about Tricia Bashirian is Tricia Bashirian.
+   */
+  const identity = span?.identity ?? value;
+
   switch (action) {
     case "passthrough":
       return value;
 
     case "tokenize":
-      return tokenize(value, dataClass, context);
+      return record(tokenize(identity, dataClass, context), value, "tokenize", context);
 
     case "mask":
-      return maskValue(value, dataClass);
+      return record(maskValue(value, dataClass), value, "mask", context);
 
     case "contextualize": {
       const contextualized = contextualize(value, dataClass, {
@@ -203,10 +246,31 @@ function applyAction(
         now: context.now,
       });
       // No contextualizer for this class, or the value did not parse: fall back
-      // to tokenize rather than leaking the original.
-      return contextualized ?? tokenize(value, dataClass, context);
+      // to tokenize rather than leaking the original. The *token* is what the
+      // agent then sees, so that is the mechanism recorded, not the one the
+      // policy asked for.
+      return contextualized === null
+        ? record(tokenize(identity, dataClass, context), value, "tokenize", context)
+        : record(contextualized, value, "contextualize", context);
     }
   }
+}
+
+/**
+ * Notes that `mechanism` replaced something, and hands the replacement back.
+ *
+ * The `!==` is the whole point: `contextualize` on a `city` field returns the
+ * city, which changes nothing, and a result nothing changed must not be
+ * announced to the agent as though it had been.
+ */
+function record(
+  replacement: string,
+  original: string,
+  mechanism: TransformAction,
+  context: ApplyContext,
+): string {
+  if (replacement !== original) context.applied.add(mechanism);
+  return replacement;
 }
 
 function tokenize(value: string, dataClass: DataClass, context: ApplyContext): string {

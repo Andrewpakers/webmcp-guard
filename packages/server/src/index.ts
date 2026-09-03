@@ -43,6 +43,7 @@ export {
   type ClassifiedPrimitive,
   type ClassifiedString,
   type ClassifierOptions,
+  type NameMatcher,
   type PlaceContext,
   type ScanOptions,
   type Span,
@@ -124,6 +125,7 @@ export {
   humanApprovedNote,
   justificationAcceptedNote,
   justificationMessage,
+  transformNotice,
   verdictMessage,
 } from "./messages";
 

@@ -263,6 +263,150 @@ describe("free_text_phi as a whole-field action", () => {
   });
 });
 
+/**
+ * The identity rule: a bare dictionary hit tokenizes the *person*, not the
+ * fragment. If "Tricia" and "Tricia Bashirian" hashed differently, an agent
+ * could no longer tell the note and the chart are about one patient — which is
+ * the only reason the tokens are deterministic in the first place.
+ */
+describe("bare names in free text", () => {
+  const NAME_ONLY = matrix({ name: "tokenize" });
+
+  function bodyOf(outcome: ReturnType<typeof run>): string {
+    return (outcome.result as { name: string; body: string }).body;
+  }
+
+  it("mints the same token for a bare first name as for the full name", () => {
+    const outcome = run(
+      { name: "Tricia Bashirian", body: "Reached Tricia by phone to confirm." },
+      NAME_ONLY,
+    );
+    const result = outcome.result as { name: string; body: string };
+
+    expect(result.name).toMatch(/^tok_name_[0-9a-f]{8}$/);
+    expect(result.body).toBe(`Reached ${result.name} by phone to confirm.`);
+  });
+
+  it("mints the same token for a bare last name", () => {
+    const outcome = run({ name: "Tricia Bashirian", body: "Bashirian rescheduled." }, NAME_ONLY);
+    const result = outcome.result as { name: string; body: string };
+
+    expect(result.body).toBe(`${result.name} rescheduled.`);
+  });
+
+  it("resolves a full name, a bare name and an honorific to one identical token", () => {
+    const outcome = run(
+      {
+        name: "Tricia Bashirian",
+        body:
+          "Tricia Bashirian was seen today. Reached Tricia by phone afterwards; " +
+          "Ms. Bashirian will call back. tricia bashirian is also on the waitlist.",
+      },
+      NAME_ONLY,
+    );
+    const result = outcome.result as { name: string; body: string };
+    const tokens = [...bodyOf(outcome).matchAll(/tok_name_[0-9a-f]{8}/g)].map((hit) => hit[0]);
+
+    expect(tokens).toHaveLength(4);
+    expect(new Set(tokens)).toEqual(new Set([result.name]));
+    expect(result.body).not.toMatch(/Tricia|Bashirian|tricia|bashirian/);
+    // One person, one vault row, whatever the note called them.
+    expect(outcome.vaultEntries).toHaveLength(1);
+    expect(tokenizer.open(outcome.vaultEntries[0])).toBe("Tricia Bashirian");
+  });
+
+  it("leaves an ambiguous bare first name in the clear", () => {
+    const outcome = transformValue(
+      { body: "Reached Tricia by phone." },
+      {
+        perClass: NAME_ONLY,
+        tokenizer,
+        classifier: { names: ["Tricia Bashirian", "Tricia Okonkwo"] },
+        now: NOW,
+      },
+    );
+
+    expect(bodyOf(outcome)).toBe("Reached Tricia by phone.");
+    expect(outcome.classesFound).toEqual([]);
+    expect(outcome.actionsApplied).toEqual([]);
+  });
+
+  it("leaves a lower-case homograph of a patient name alone", () => {
+    const outcome = transformValue(
+      { body: "Told the family to dock the boat before the storm." },
+      { perClass: NAME_ONLY, tokenizer, classifier: { names: ["Dock Bode"] }, now: NOW },
+    );
+
+    expect(bodyOf(outcome)).toBe("Told the family to dock the boat before the storm.");
+    expect(outcome.actionsApplied).toEqual([]);
+  });
+
+  it("still tokenizes the same patient when their name is capitalised as a word", () => {
+    const outcome = transformValue(
+      { body: "Dock is due for a follow-up." },
+      { perClass: NAME_ONLY, tokenizer, classifier: { names: ["Dock Bode"] }, now: NOW },
+    );
+
+    expect(bodyOf(outcome)).toMatch(/^tok_name_[0-9a-f]{8} is due for a follow-up\.$/);
+    expect(tokenizer.open(outcome.vaultEntries[0])).toBe("Dock Bode");
+  });
+
+  it("masks a bare name without leaking which name it was", () => {
+    const outcome = run({ body: "Reached Tricia by phone." }, matrix({ name: "mask" }));
+    expect(bodyOf(outcome)).toBe(`Reached ${MASK_GLYPH} by phone.`);
+    expect(outcome.actionsApplied).toEqual(["mask"]);
+  });
+});
+
+/**
+ * `actionsApplied` drives the agent-facing privacy notice, so it has to be
+ * literally true: the mechanisms that *replaced* something on this result, and
+ * nothing else.
+ */
+describe("actionsApplied", () => {
+  it("is empty when no transform rule matched", () => {
+    expect(run(payload(), null).actionsApplied).toEqual([]);
+  });
+
+  it("is empty when a matched matrix changed nothing", () => {
+    const outcome = run({ patients: [{ mrn: "LM-100001" }] }, matrix({ name: "tokenize" }));
+    expect(outcome.result).toEqual({ patients: [{ mrn: "LM-100001" }] });
+    expect(outcome.actionsApplied).toEqual([]);
+  });
+
+  it("does not count a contextualizer that returned its own input", () => {
+    // City and state *are* the contextualized granularity, so this is a no-op.
+    const outcome = run(
+      { addressCity: "Portland", addressState: "OR" },
+      matrix({ address: "contextualize" }),
+    );
+    expect(outcome.result).toEqual({ addressCity: "Portland", addressState: "OR" });
+    expect(outcome.actionsApplied).toEqual([]);
+  });
+
+  it("reports each mechanism exactly once, in a stable order", () => {
+    const outcome = run(
+      payload(),
+      matrix({ name: "tokenize", mrn: "tokenize", email: "mask", dob: "contextualize" }),
+    );
+    expect(outcome.actionsApplied).toEqual(["tokenize", "mask", "contextualize"]);
+  });
+
+  it.each([
+    ["tokenize", matrix({ ssn: "tokenize" }), ["tokenize"]],
+    ["mask", matrix({ ssn: "mask" }), ["mask"]],
+    ["contextualize", matrix({ dob: "contextualize" }), ["contextualize"]],
+  ])("reports only %s when that is all that ran", (_label, perClass, expected) => {
+    const outcome = run({ ssn: "927-78-1337", dob: "1985-04-12" }, perClass);
+    expect(outcome.actionsApplied).toEqual(expected);
+  });
+
+  it("reports tokenize, not contextualize, when a contextualizer fell back", () => {
+    const outcome = run({ dob: "sometime in the eighties" }, matrix({ dob: "contextualize" }));
+    expect(outcome.actionsApplied).toEqual(["tokenize"]);
+  });
+});
+
 describe("shape preservation", () => {
   it("keeps key order, arrays, nulls and untouched numbers", () => {
     const outcome = run(

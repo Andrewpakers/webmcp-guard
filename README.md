@@ -59,6 +59,12 @@ The same record, returned by `get_patient` through WebMCP Guard's default seeded
 }
 ```
 
+Transformed results also end with a short **privacy notice written for the
+model** — which values were replaced, by which rule, that tokens are stable
+identity handles it can pass back into any tool, and that masked and
+generalized values cannot be recovered — so the agent reasons about tokens
+correctly instead of guessing.
+
 Three things are happening at once, and the third is the point:
 
 1. **Identifiers are tokenized, not deleted.** `tok_ssn_…` is an HMAC of the value under an org secret, so the same SSN always produces the same token. The agent can still reason about identity and equality.
@@ -274,11 +280,11 @@ Building against a browser API this new means the spec and the implementation so
 
 ## Deployed URLs
 
-| What                    | URL                                                                                        | Credentials                                            |
-| ----------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
-| Lakeside Medical portal | [webmcp-guard-portal.onrender.com/patients](https://webmcp-guard-portal.onrender.com/patients) | No login; switch persona in the header                 |
-| WebMCP Guard Console    | [webmcp-guard-console.vercel.app](https://webmcp-guard-console.vercel.app)                 | Admin token: provided on the Devpost submission form   |
-| Demo video              | `TODO-until-video`                                                                         | —                                                      |
+| What                    | URL                                                                                            | Credentials                                          |
+| ----------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Lakeside Medical portal | [webmcp-guard-portal.onrender.com/patients](https://webmcp-guard-portal.onrender.com/patients) | No login; switch persona in the header               |
+| WebMCP Guard Console    | [webmcp-guard-console.vercel.app](https://webmcp-guard-console.vercel.app)                     | Admin token: provided on the Devpost submission form |
+| Demo video              | `TODO-until-video`                                                                             | —                                                    |
 
 Deploy procedure: [`DEPLOYMENT.md`](DEPLOYMENT.md) + [`render.yaml`](render.yaml).
 

@@ -338,6 +338,14 @@ export function createGuardedExecute(
     }
 
     emit(guardEvent("transformed", tool, { callId: gate.callId, verdict: gate.verdict }));
-    return toAgentString(transformed.result);
+
+    /**
+     * The guard's own explanation of what it did to this result, appended after
+     * a blank line so it reads as a footnote rather than as part of the data.
+     * The server only sends one when it actually replaced something, so a
+     * passthrough result reaches the agent byte-for-byte as the site wrote it.
+     */
+    const body = toAgentString(transformed.result);
+    return transformed.notice === undefined ? body : `${body}\n\n${transformed.notice}`;
   };
 }

@@ -135,6 +135,18 @@ export const TransformResponseSchema = z
     result: z.unknown(),
     classesFound: z.array(DataClassSchema),
     ruleIds: z.array(z.string()),
+    /**
+     * Agent-facing prose explaining what was done to this result and what the
+     * replacements mean — present **only** when the transform actually replaced
+     * something. The SDK appends it to the string it hands the model, so a
+     * model that has never seen a `tok_…` string learns in-band that tokens are
+     * stable identifiers it can compare and pass back, and that masked or
+     * generalized values are gone for good.
+     *
+     * Optional, and additive: a client that ignores it behaves exactly as it
+     * did before, which is why the wire version stays at 1.
+     */
+    notice: z.string().min(1).optional(),
   })
   .strict();
 

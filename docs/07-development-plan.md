@@ -451,3 +451,23 @@ what's next, deviations/decisions._
   with patient intact, complete audit trail). ALL autonomous work is now
   done. Awaiting user for: GitHub publish, Render/Vercel deploys,
   ChatGPT-browser validation, video recording, Devpost submission.
+- 2026-09-02 — Deployed (portal on Render, console on Vercel) and
+  live-tested extensively: 7 tools in a real browser against the live URL,
+  token round-trip, justification both ways, confirmation decline +
+  tamper/replay burns, billing-cookie-beats-spoofed-claim, masked-at-rest
+  grep, CORS negatives, admin 401s. User-driven fixes landed the same day:
+  (1) Claude provider demo — `claude` UA/brand marker +
+  `posture-deny-claude-agents` seeded disabled + stale "inert until
+  Phase 5" console copy corrected (agents matchers are enforced; JSON view
+  edits them); (2) **bare-name leak closed**: dictionary scanner now
+  matches bare given/middle/family names case-sensitively, resolving each
+  span to its full-name identity token (same token as the structured
+  field) with an only-if-unambiguous rule — accepted cost: ~5 faker street
+  names containing surnames now over-redact in note prose (over-redaction
+  beats reopening the leak); (3) transformed results end with a
+  model-facing privacy notice (optional `notice` on TransformResponse,
+  appended by the SDK) naming the rule and only the mechanisms actually
+  used. 58 files / 1213 tests green; Fable-reviewed (classifier identity
+  resolution read directly). Live audit-log "emptiness" diagnosed as
+  expected post-redeploy state (ephemeral disk reseeds; human browsing is
+  not audited — agent calls and reveals are).

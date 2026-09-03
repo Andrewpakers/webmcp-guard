@@ -253,6 +253,176 @@ describe("dictionary pass — names", () => {
   });
 });
 
+/**
+ * Bare given and family names — the leak found in live testing. A seeded note
+ * reading "Reached Tricia by phone" left the first name in the clear while the
+ * same patient's full name tokenized, which is all a model needs to reassemble
+ * the identity the guard just protected.
+ *
+ * Three properties are load-bearing and each has its own test below: the bare
+ * hit resolves to the *full* name (so it mints the same token), an ambiguous
+ * fragment is left alone, and matching is case-sensitive so ordinary English
+ * words that happen to be names survive.
+ */
+describe("dictionary pass — bare given and family names", () => {
+  /** The span the dictionary pass produced for `text`, if there was one. */
+  function nameSpanIn(text: string, names: readonly string[] = NAMES): Span | undefined {
+    return scanText(text, { nameMatcher: buildNameMatcher(names) }).find(
+      (span) => span.dataClass === "name",
+    );
+  }
+
+  it("matches a bare first name and resolves it to the full name", () => {
+    const span = nameSpanIn("Reached Tricia by phone to confirm.");
+    expect(span).toMatchObject({ text: "Tricia", identity: "Tricia Bashirian" });
+  });
+
+  it("matches a bare last name and resolves it to the full name", () => {
+    const span = nameSpanIn("Bashirian asked about refills.");
+    expect(span).toMatchObject({ text: "Bashirian", identity: "Tricia Bashirian" });
+  });
+
+  it("matches a middle name too, which leaks exactly as readily", () => {
+    const span = nameSpanIn("Spoke to Quinn about the referral.", ["Dana Quinn Halloran"]);
+    expect(span).toMatchObject({ text: "Quinn", identity: "Dana Quinn Halloran" });
+  });
+
+  it("resolves an honorific form to the full name as well", () => {
+    expect(nameSpanIn("Ms. Bashirian asked about refills.")).toMatchObject({
+      text: "Ms. Bashirian",
+      identity: "Tricia Bashirian",
+    });
+    expect(nameSpanIn("Dr Whitfield reviewed the chart.")).toMatchObject({
+      text: "Dr Whitfield",
+      identity: "Ada Whitfield",
+    });
+  });
+
+  it("resolves a lower-cased full name to the dictionary's own spelling", () => {
+    expect(nameSpanIn("spoke with tricia bashirian today.")).toMatchObject({
+      text: "tricia bashirian",
+      identity: "Tricia Bashirian",
+    });
+  });
+
+  it("leaves a bare name alone when two people in the dictionary share it", () => {
+    const shared = ["Tricia Bashirian", "Tricia Okonkwo"];
+
+    // Ambiguous first name: no single right token to mint, so nothing is done.
+    expect(nameSpanIn("Reached Tricia by phone.", shared)).toBeUndefined();
+
+    // The unambiguous halves of the same dictionary still match.
+    expect(nameSpanIn("Bashirian asked about refills.", shared)).toMatchObject({
+      text: "Bashirian",
+      identity: "Tricia Bashirian",
+    });
+    // ...and a full name is never affected by the ambiguity of its parts. It
+    // carries no `identity` because the matched text already *is* the value.
+    const full = nameSpanIn("Tricia Okonkwo called.", shared);
+    expect(full).toMatchObject({ text: "Tricia Okonkwo" });
+    expect(full?.identity).toBeUndefined();
+  });
+
+  it("counts one person listed twice as one owner, not as an ambiguity", () => {
+    expect(
+      nameSpanIn("Reached Tricia by phone.", ["Tricia Bashirian", "tricia bashirian"]),
+    ).toMatchObject({
+      text: "Tricia",
+      identity: "Tricia Bashirian",
+    });
+  });
+
+  it("still matches an honorific form whose surname is shared, without inventing an identity", () => {
+    const shared = ["Ada Bashirian", "Tricia Bashirian"];
+    const span = nameSpanIn("Ms. Bashirian asked about refills.", shared);
+
+    // An honorific in front of a known surname is a person whichever one it is,
+    // so it is still replaced — it just tokenizes its own text.
+    expect(span).toMatchObject({ text: "Ms. Bashirian" });
+    expect(span?.identity).toBeUndefined();
+  });
+
+  it("is case-sensitive: the boat is not the patient", () => {
+    const names = ["Dock Bode"];
+    expect(nameSpanIn("Dock is due for a follow-up.", names)).toMatchObject({
+      text: "Dock",
+      identity: "Dock Bode",
+    });
+    expect(nameSpanIn("Told the family to dock the boat before the storm.", names)).toBeUndefined();
+    expect(nameSpanIn("Patient works at the DOCK on weekends.", names)).toBeUndefined();
+  });
+
+  it("requires whole-word boundaries", () => {
+    expect(nameSpanIn("Triciana Bashirianopoulos is a different person.")).toBeUndefined();
+    expect(nameSpanIn("unTricia is not a word, but it is not a name either.")).toBeUndefined();
+  });
+
+  it("prefers the longest match: a full name never splits into fragments", () => {
+    const spans = scanText("Tricia Bashirian called.", { nameMatcher: buildNameMatcher(NAMES) });
+    expect(spans).toHaveLength(1);
+    expect(spans[0]).toMatchObject({ text: "Tricia Bashirian", start: 0, end: 16 });
+
+    // Same for the honorific form.
+    const honorific = scanText("Ms. Bashirian called.", { nameMatcher: buildNameMatcher(NAMES) });
+    expect(honorific).toHaveLength(1);
+    expect(honorific[0]).toMatchObject({ text: "Ms. Bashirian" });
+  });
+
+  it("finds every person in a sentence that mixes all three forms", () => {
+    const spans = scanText("Tricia Bashirian saw Ms. Whitfield; Tricia will call Ada back.", {
+      nameMatcher: buildNameMatcher(NAMES),
+    });
+
+    expect(spans.map((span) => span.text)).toEqual([
+      "Tricia Bashirian",
+      "Ms. Whitfield",
+      "Tricia",
+      "Ada",
+    ]);
+    expect(spans.map((span) => span.identity)).toEqual([
+      undefined,
+      "Ada Whitfield",
+      "Tricia Bashirian",
+      "Ada Whitfield",
+    ]);
+  });
+
+  it("keeps a higher-precedence detector's claim on overlapping text", () => {
+    // The e-mail contains both halves of the name; e-mail outranks name.
+    const spans = scanText("Write to Tricia.Bashirian@example.com about it.", {
+      nameMatcher: buildNameMatcher(NAMES),
+    });
+    expect(spans.map((span) => span.dataClass)).toEqual(["email"]);
+  });
+
+  it("builds no bare pattern from initials, symbols or lower-case entries", () => {
+    // "J." and "R." are not names on their own; "D*"/"E+" are not names at all;
+    // an all-lower-case entry has no capitalised form to match.
+    const matcher = buildNameMatcher(["J. R. Smith", "D* E+", "quiet person"]);
+    expect(matcher).not.toBeNull();
+    expect(matcher?.bare?.source).not.toContain("J\\.");
+    expect(matcher?.bare?.source).not.toContain("D\\*");
+    expect(nameSpanIn("quiet was the word for it.", ["quiet person"])).toBeUndefined();
+
+    // "Smith" is a real bare surname and does qualify.
+    expect(nameSpanIn("Smith rescheduled.", ["J. R. Smith"])).toMatchObject({
+      text: "Smith",
+      identity: "J. R. Smith",
+    });
+  });
+
+  it("has no bare pattern at all when nothing in the dictionary qualifies", () => {
+    expect(buildNameMatcher(["tricia bashirian"])?.bare).toBeNull();
+  });
+
+  it("resolves nothing for text that is not in the dictionary", () => {
+    const matcher = buildNameMatcher(NAMES);
+    expect(matcher?.resolve("Marvin Gaye")).toBeNull();
+    expect(matcher?.resolve("")).toBeNull();
+    expect(matcher?.resolve("Dr. ")).toBeNull();
+  });
+});
+
 describe("overlap resolution", () => {
   it("prefers the higher-precedence class when two detectors collide", () => {
     // An SSN sits inside the digits a naive card scan would grab; SSN wins.

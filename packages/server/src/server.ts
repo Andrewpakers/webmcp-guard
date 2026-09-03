@@ -34,7 +34,13 @@ import {
 import { z } from "zod";
 
 import { UNAUTHORIZED_MESSAGE, isAdminRequest } from "./auth";
-import { buildNameMatcher, classify, orderClasses, type ClassifierOptions } from "./classify";
+import {
+  buildNameMatcher,
+  classify,
+  orderClasses,
+  type ClassifierOptions,
+  type NameMatcher,
+} from "./classify";
 import { CONFIRMATION_TTL_MS, hashCallArgs, validateConfirmation } from "./confirmation";
 import { detokenize } from "./detokenize";
 import { jsonError, jsonPayload, parseEnvelope, parseWith, queryObject, truncate } from "./http";
@@ -54,6 +60,7 @@ import {
   humanApprovedNote,
   justificationAcceptedNote,
   justificationMessage,
+  transformNotice,
   verdictMessage,
 } from "./messages";
 import { resolvePolicy, type PolicyDecision } from "./policy-engine";
@@ -356,10 +363,10 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
    * every single tool call; the TTL is what makes a patient added a minute ago
    * detectable in free text without a restart.
    */
-  let nameMatcherCache: { matcher: RegExp | null; expiresAt: number } | null = null;
-  let nameMatcherInFlight: Promise<RegExp | null> | null = null;
+  let nameMatcherCache: { matcher: NameMatcher | null; expiresAt: number } | null = null;
+  let nameMatcherInFlight: Promise<NameMatcher | null> | null = null;
 
-  async function nameMatcher(): Promise<RegExp | null> {
+  async function nameMatcher(): Promise<NameMatcher | null> {
     if (config.nameDictionary === undefined) return null;
 
     const now = Date.now();
@@ -370,7 +377,7 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
     if (nameMatcherInFlight !== null) return nameMatcherInFlight;
 
     nameMatcherInFlight = (async () => {
-      let matcher: RegExp | null = null;
+      let matcher: NameMatcher | null = null;
       try {
         const names = await config.nameDictionary?.();
         matcher = Array.isArray(names) ? buildNameMatcher(names) : null;
@@ -926,8 +933,8 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
    */
   async function transformAspect(
     ruleIds: string[],
-  ): Promise<{ ruleIds: string[]; perClass: PerClassTransform | null }> {
-    if (ruleIds.length === 0) return { ruleIds: [], perClass: null };
+  ): Promise<{ ruleIds: string[]; perClass: PerClassTransform | null; rule: Rule | null }> {
+    if (ruleIds.length === 0) return { ruleIds: [], perClass: null, rule: null };
 
     const rules = await storage.listRules();
     const byId = new Map(rules.map((rule) => [rule.id, rule]));
@@ -942,6 +949,10 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
       ruleIds: matched.map((rule) => rule.id),
       perClass:
         first !== undefined && first.action.type === "transform" ? first.action.perClass : null,
+      // The rule the agent-facing privacy notice names. Read live, like the
+      // matrix beside it, so the notice can never credit a rule that no longer
+      // exists.
+      rule: first ?? null,
     };
   }
 
@@ -958,6 +969,8 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
 
     let ruleIds: string[] = [];
     let perClass: PerClassTransform | null = null;
+    /** The transform rule the privacy notice credits, when one applied. */
+    let transformRule: Rule | null = null;
     let pending: LogRecord | null = null;
 
     if (callId !== undefined) {
@@ -975,6 +988,7 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
         const aspect = await transformAspect(candidate.ruleIds);
         ruleIds = aspect.ruleIds;
         perClass = aspect.perClass;
+        transformRule = aspect.rule;
       }
     }
 
@@ -993,6 +1007,7 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
       orphanDecisionRuleIds = decision.ruleIds;
       ruleIds = decision.transformRule === null ? [] : [decision.transformRule.id];
       perClass = decision.perClass;
+      transformRule = decision.transformRule;
     }
 
     const outcome = transformValue(result, { perClass, tokenizer, classifier });
@@ -1044,11 +1059,19 @@ export function createGuardServer(config: GuardServerConfig): GuardServer {
       );
     }
 
+    /**
+     * The result explains itself to the model — but only when there is
+     * something to explain. `actionsApplied` is empty for a passthrough result,
+     * and an empty list produces no notice at all.
+     */
+    const notice = transformNotice(transformRule, outcome.actionsApplied);
+
     return jsonPayload(
       TransformResponseSchema.parse({
         result: outcome.result,
         classesFound: outcome.classesFound,
         ruleIds,
+        ...(notice !== undefined ? { notice } : {}),
       }),
       200,
       cors,

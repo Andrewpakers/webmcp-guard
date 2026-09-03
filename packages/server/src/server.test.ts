@@ -1538,6 +1538,105 @@ describe("the data pipeline through /gate and /transform", () => {
     expect(nameDictionary).toHaveBeenCalledTimes(1);
   });
 
+  it("gives a bare first name in prose the same token as the structured field", async () => {
+    // The leak found in live testing: a seeded note reading "Reached Tricia by
+    // phone" left the given name in the clear beside a tokenized full name.
+    const nameDictionary = vi.fn(() => ["Tricia Bashirian", "Ada Whitfield"]);
+    const dictionaryGuard = createGuardServer(config(memoryStorage(), { nameDictionary }));
+    await dictionaryGuard.ready();
+
+    const gate = await payloadOf<GateResponse>(
+      await send(dictionaryGuard, "POST", "gate", { payload: gatePayload() }),
+    );
+    const transform = await payloadOf<TransformResponse>(
+      await send(dictionaryGuard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: {
+            patients: [{ name: "Tricia Bashirian" }],
+            notes: [{ body: "Reached Tricia by phone; Ms. Bashirian will call back." }],
+          },
+        },
+      }),
+    );
+
+    const result = transform.result as {
+      patients: { name: string }[];
+      notes: { body: string }[];
+    };
+    const token = result.patients[0].name;
+
+    expect(token).toMatch(/^tok_name_[0-9a-f]{8}$/);
+    expect(result.notes[0].body).toBe(`Reached ${token} by phone; ${token} will call back.`);
+  });
+
+  it("emits a privacy notice naming the rule and only the mechanisms it used", async () => {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload() }),
+    );
+    const transform = await payloadOf<TransformResponse>(
+      await send(guard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: { patients: [{ mrn: "LM-100001", dob: "1985-04-12" }] },
+        },
+      }),
+    );
+
+    const notice = transform.notice ?? "";
+    expect(notice).toContain("Tokenize PHI on phi-tagged tools (phi-transform-default)");
+    expect(notice).toContain("tok_name_1a2b3c4d");
+    expect(notice).toContain("Generalized values");
+    // Nothing on this result was masked, so masks go unmentioned.
+    expect(notice).not.toContain("Masked");
+  });
+
+  it("sends no notice when the transform changed nothing", async () => {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload() }),
+    );
+    const transform = await payloadOf<TransformResponse>(
+      await send(guard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          // Clinical data the shipped matrix does not name.
+          result: { patients: [{ primaryConditions: ["Hypertension"], visits: 3 }] },
+        },
+      }),
+    );
+
+    expect(transform.result).toEqual({
+      patients: [{ primaryConditions: ["Hypertension"], visits: 3 }],
+    });
+    expect(transform.notice).toBeUndefined();
+  });
+
+  it("sends no notice when no transform rule matched at all", async () => {
+    const gate = await payloadOf<GateResponse>(
+      await send(guard, "POST", "gate", { payload: gatePayload() }),
+    );
+    await storage.updateRule("phi-transform-default", { enabled: false });
+
+    const transform = await payloadOf<TransformResponse>(
+      await send(guard, "POST", "transform", {
+        payload: {
+          app: APP,
+          tool: "search_patients",
+          callId: gate.callId,
+          result: { patients: [{ ssn: "927-78-1337" }] },
+        },
+      }),
+    );
+
+    expect(transform.notice).toBeUndefined();
+  });
+
   it("keeps working when the host's name dictionary throws", async () => {
     const nameDictionary = vi.fn(() => {
       throw new Error("database is down");

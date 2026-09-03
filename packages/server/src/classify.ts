@@ -13,8 +13,9 @@ import { DATA_CLASSES, type DataClass } from "@webmcp-guard/shared";
  *    (Luhn-checked) and dates in DOB-ish contexts.
  * 3. **Dictionary pass.** Names are the class regexes cannot do. The host app
  *    knows its own people, so it supplies them (`GuardServerConfig.nameDictionary`)
- *    and free text is scanned for "First Last" and "Ms. Last". `docs/04`
- *    explicitly sanctions this and files NER as future work.
+ *    and free text is scanned for "First Last", "Ms. Last" *and* bare given or
+ *    family names ("Reached Tricia by phone"). `docs/04` explicitly sanctions
+ *    this and files NER as future work.
  *
  * The output is an annotated *tree*, not a flat report, so `transform.ts` can
  * act on exactly what the classifier decided. Classifying and transforming
@@ -152,6 +153,19 @@ export interface Span {
   text: string;
   dataClass: DataClass;
   detector: string;
+  /**
+   * The **whole value this span denotes**, when the matched text is only a
+   * fragment of it — a bare "Tricia" resolved against the dictionary to
+   * "Tricia Bashirian", or "Ms. Bashirian" to the same.
+   *
+   * This is the identity rule that makes the product work: tokenization must
+   * hash the resolved value, never the fragment. If "tricia" and
+   * "tricia bashirian" produced different tokens, an agent could no longer tell
+   * that the note and the patient record are about one person, which is the
+   * entire reason tokens are deterministic. Set only by the dictionary pass;
+   * absent means "the matched text *is* the value".
+   */
+  identity?: string;
 }
 
 /** Default MRN shape: `LM-100042`. Overridable per deployment (`mrnPattern`). */
@@ -236,11 +250,22 @@ function span(match: RegExpExecArray, dataClass: DataClass, detector: string): S
   };
 }
 
+/**
+ * A dictionary hit, with {@link Span.identity} filled in when the matched text
+ * resolves to a different spelling than it wears in the prose — a bare
+ * fragment, an honorific form, or a lower-cased full name.
+ */
+function nameSpan(match: RegExpExecArray, detector: string, matcher: NameMatcher): Span {
+  const hit = span(match, "name", detector);
+  const resolved = matcher.resolve(hit.text);
+  return resolved !== null && resolved !== hit.text ? { ...hit, identity: resolved } : hit;
+}
+
 export interface ScanOptions {
   /** Overrides {@link DEFAULT_MRN_PATTERN}. */
   mrnPattern?: RegExp;
   /** Compiled known-person matcher from {@link buildNameMatcher}. */
-  nameMatcher?: RegExp | null;
+  nameMatcher?: NameMatcher | null;
 }
 
 /**
@@ -295,9 +320,22 @@ export function scanText(text: string, options: ScanOptions = {}): Span[] {
     }
   }
 
-  if (options.nameMatcher) {
-    for (const match of matchAll(options.nameMatcher, text)) {
-      candidates.push(span(match, "name", "name-dictionary"));
+  const names = options.nameMatcher;
+  if (names) {
+    for (const match of matchAll(names.full, text)) {
+      candidates.push(nameSpan(match, "name-dictionary", names));
+    }
+    // A second, **case-sensitive** scan. Splitting it out is not an
+    // optimisation: full names have to stay case-insensitive (a note may say
+    // "spoke with tricia bashirian") while bare fragments must not, and one
+    // RegExp carries one set of flags. Overlaps between the two passes are
+    // settled by `resolveOverlaps`, where the longer span wins — so a full name
+    // in the text yields one full-name span, never a full-name span plus the
+    // two bare fragments inside it.
+    if (names.bare !== null) {
+      for (const match of matchAll(names.bare, text)) {
+        candidates.push(nameSpan(match, "name-dictionary-bare", names));
+      }
     }
   }
 
@@ -337,29 +375,93 @@ export function resolveOverlaps(candidates: Span[]): Span[] {
 /** Honorifics matched in front of a known last name. */
 const HONORIFICS = ["mr", "mrs", "ms", "miss", "mx", "dr", "prof"];
 
+/** Strips a leading "Ms. " / "Dr " so the surname behind it can be resolved. */
+const HONORIFIC_PREFIX = new RegExp(`^(?:${HONORIFICS.join("|")})\\.?\\s+`, "i");
+
 /**
  * Upper bound on dictionary size. A regex alternation over an unbounded,
  * host-supplied list is a denial-of-service surface; 5000 names is far more
- * than any demo needs and keeps the compiled pattern sane.
+ * than any demo needs and keeps the compiled pattern sane. Bare-name
+ * alternatives are derived from the same capped set, and only the unambiguous
+ * ones survive, so the second pattern is never larger than a small multiple of
+ * the first.
  */
 export const MAX_NAME_DICTIONARY = 5000;
+
+/**
+ * The shape a dictionary part must have before it is matched **on its own**.
+ *
+ * Two characters minimum, letters (plus combining marks, hyphens and
+ * apostrophes) only, and a leading **uppercase** letter. This is the
+ * false-positive guard: "Dock" the patient is matched, "dock the boat" is not,
+ * and initials like "J." never become a pattern at all.
+ */
+const BARE_NAME_SHAPE = /^\p{Lu}[\p{L}\p{M}'’-]+$/u;
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Case- and whitespace-insensitive key for one name or name fragment. */
+function normalizeName(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
 /**
- * Compiles a list of known full names into one case-insensitive matcher for
- * "First Last" and "Ms. Last".
- *
- * Only *full* names go in verbatim; bare surnames are matched only behind an
- * honorific, because a lone "Park" or "Green" in clinical prose is usually not
- * a person. Returns `null` for an empty dictionary so callers can skip the pass
- * entirely.
+ * A compiled known-person matcher: two patterns plus the lookup that turns a
+ * hit back into the person it names.
  */
-export function buildNameMatcher(names: readonly string[]): RegExp | null {
+export interface NameMatcher {
+  /**
+   * "First Last" and "Ms. Last", **case-insensitive** — a clinician typing
+   * "spoke with tricia bashirian" still leaks the name.
+   */
+  full: RegExp;
+  /**
+   * Bare given/family names that map to exactly one person,
+   * **case-sensitive**. `null` when no dictionary part qualified.
+   */
+  bare: RegExp | null;
+  /**
+   * The dictionary full name a hit denotes, or `null` when it cannot be pinned
+   * to exactly one person. Callers tokenize this, never the matched fragment.
+   */
+  resolve: (text: string) => string | null;
+}
+
+/**
+ * Compiles a list of known full names into a matcher for "First Last",
+ * "Ms. Last" and bare "First" / "Last".
+ *
+ * Three rules govern the bare pass, and all three are load-bearing:
+ *
+ * 1. **Identity.** A bare hit resolves to the full name before anything is done
+ *    with it, so "Tricia" and "Tricia Bashirian" mint the *same* token. See
+ *    {@link Span.identity}.
+ * 2. **Ambiguity.** A bare part is only matched when it belongs to exactly one
+ *    person in the dictionary. Two patients called "Tricia" and the bare word
+ *    is left alone: a first name shared by several people identifies far less,
+ *    there is no single right token to mint for it, and minting the wrong one
+ *    would assert an identity the data does not support. Full names and
+ *    honorific forms are unaffected by this rule — they still match, they just
+ *    tokenize their own text when the surname is shared.
+ * 3. **Case.** Bare matching is case-sensitive on the dictionary's own
+ *    capitalised spelling, with word boundaries either side. Ordinary English
+ *    is full of words that are also names.
+ *
+ * Returns `null` for a dictionary with no usable (two-part) name, so callers
+ * can skip the pass entirely.
+ */
+export function buildNameMatcher(names: readonly string[]): NameMatcher | null {
   const fullNames = new Set<string>();
   const lastNames = new Set<string>();
+
+  /** Normalized full name → the dictionary's own spelling of it. */
+  const identity = new Map<string, string>();
+  /** Lowercased part → the normalized full names that contain it. */
+  const partOwners = new Map<string, Set<string>>();
+  /** Lowercased part → the capitalised surface form to match, when eligible. */
+  const bareSurface = new Map<string, string>();
 
   for (const raw of names.slice(0, MAX_NAME_DICTIONARY)) {
     if (typeof raw !== "string") continue;
@@ -369,12 +471,45 @@ export function buildNameMatcher(names: readonly string[]): RegExp | null {
       .filter((part) => part.length > 0);
     if (parts.length < 2) continue;
 
+    const fullName = parts.join(" ");
+    const key = normalizeName(fullName);
+
     fullNames.add(parts.map(escapeRegExp).join("\\s+"));
+    // First spelling wins, so a dictionary that lists one person twice in two
+    // casings still resolves to one deterministic value.
+    if (!identity.has(key)) identity.set(key, fullName);
+
     const last = parts[parts.length - 1];
     if (last.length >= 2) lastNames.add(escapeRegExp(last));
+
+    // Every part, not just the first and the last: a middle name in the
+    // dictionary leaks exactly as readily as a first name does.
+    for (const part of parts) {
+      const partKey = part.toLowerCase();
+      let owners = partOwners.get(partKey);
+      if (owners === undefined) {
+        owners = new Set<string>();
+        partOwners.set(partKey, owners);
+      }
+      // Keyed on the *normalized* full name, so "Dock Bode" listed twice counts
+      // as one owner rather than reading as an ambiguity.
+      owners.add(key);
+
+      if (BARE_NAME_SHAPE.test(part) && !bareSurface.has(partKey)) {
+        bareSurface.set(partKey, part);
+      }
+    }
   }
 
   if (fullNames.size === 0) return null;
+
+  /** The one person a fragment belongs to, or `null` when it is shared. */
+  function ownerOf(partKey: string): string | null {
+    const owners = partOwners.get(partKey);
+    if (owners === undefined || owners.size !== 1) return null;
+    const [only] = owners;
+    return identity.get(only) ?? null;
+  }
 
   const honorific = `(?:${HONORIFICS.join("|")})\\.?\\s+`;
   const alternatives = [
@@ -384,7 +519,31 @@ export function buildNameMatcher(names: readonly string[]): RegExp | null {
     ...(lastNames.size > 0 ? [`${honorific}(?:${[...lastNames].join("|")})`] : []),
   ];
 
-  return new RegExp(`\\b(?:${alternatives.join("|")})\\b`, "gi");
+  const bareAlternatives = [...bareSurface.entries()]
+    .filter(([partKey]) => ownerOf(partKey) !== null)
+    .map(([, surface]) => escapeRegExp(surface))
+    // Longest first again: JavaScript alternation is leftmost-first, so
+    // "Hopper" listed before "Hopper-Byron" would swallow the shorter half of a
+    // hyphenated surname and leave the rest in the clear.
+    .sort((a, b) => b.length - a.length);
+
+  return {
+    full: new RegExp(`\\b(?:${alternatives.join("|")})\\b`, "gi"),
+    bare:
+      bareAlternatives.length === 0
+        ? null
+        : new RegExp(`\\b(?:${bareAlternatives.join("|")})\\b`, "g"),
+    resolve(text: string): string | null {
+      const key = normalizeName(text);
+      const full = identity.get(key);
+      if (full !== undefined) return full;
+
+      // Either a bare fragment, or an honorific form whose surname is the
+      // fragment. Both are single dictionary parts once the honorific is gone.
+      const fragment = normalizeName(text.replace(HONORIFIC_PREFIX, ""));
+      return fragment.length === 0 ? null : ownerOf(fragment);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +595,7 @@ export interface ClassifierOptions {
   /** Known person names for the free-text dictionary pass. */
   names?: readonly string[];
   /** Pre-compiled matcher, when the caller is scanning many payloads. */
-  nameMatcher?: RegExp | null;
+  nameMatcher?: NameMatcher | null;
 }
 
 export interface Classification {

@@ -161,6 +161,26 @@ describe("transform payloads", () => {
       ruleIds: ["P-1"],
     });
     expect(parsed.classesFound).toEqual(["mrn", "name"]);
+    // `notice` is optional and additive — a response without one is still valid
+    // at wire version 1, which is what lets it be added without a bump.
+    expect(parsed.notice).toBeUndefined();
+  });
+
+  it("carries an optional privacy notice for the agent", () => {
+    const parsed = TransformResponseSchema.parse({
+      result: { name: "tok_name_1b2c3d4e" },
+      classesFound: ["name"],
+      ruleIds: ["P-1"],
+      notice: "Privacy notice: sensitive values in this result were replaced.",
+    });
+    expect(parsed.notice).toBe("Privacy notice: sensitive values in this result were replaced.");
+  });
+
+  it("rejects an empty or non-string notice rather than shipping a blank line", () => {
+    const base = { result: {}, classesFound: [], ruleIds: [] };
+    expect(TransformResponseSchema.safeParse({ ...base, notice: "" }).success).toBe(false);
+    expect(TransformResponseSchema.safeParse({ ...base, notice: 7 }).success).toBe(false);
+    expect(TransformResponseSchema.safeParse({ ...base, notice: null }).success).toBe(false);
   });
 
   it("rejects a transform response with an unknown data class", () => {

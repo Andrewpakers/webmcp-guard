@@ -1,4 +1,4 @@
-import type { Rule } from "@webmcp-guard/shared";
+import type { Rule, TransformAction } from "@webmcp-guard/shared";
 
 import { CONFIRMATION_TTL_MS, type ConfirmationFailure } from "./confirmation";
 import { DEFAULT_JUSTIFICATION_MIN_CHARS } from "./justification";
@@ -125,6 +125,57 @@ export function defaultDenyMessage(tool: string): string {
     `Ask the person using this page to perform the action in the interface, or ask an ` +
     `administrator to add a policy rule that allows it.`
   );
+}
+
+/**
+ * What the agent is told about a result the transform rewrote.
+ *
+ * A model that reads `tok_name_1a2b3c4d` with no explanation does one of two
+ * unhelpful things: treats it as corrupt data, or tries to "look up" the real
+ * value it already holds a usable handle for. So the guard explains itself
+ * in-band, once, on the results it actually changed.
+ *
+ * Two rules keep this from becoming noise:
+ *
+ * - **Only what was used.** The sentences are built from the mechanisms that
+ *   genuinely replaced something on *this* result. Nothing masked, nothing
+ *   about masks.
+ * - **Nothing when nothing happened.** An empty mechanism list returns
+ *   `undefined`, so a passthrough result reaches the model exactly as the tool
+ *   wrote it (`docs/05`: the guard is not redaction-happy — and that applies to
+ *   its prose too).
+ */
+export function transformNotice(
+  rule: Rule | null,
+  actions: readonly TransformAction[],
+): string | undefined {
+  const used = new Set(actions.filter((action) => action !== "passthrough"));
+  if (used.size === 0) return undefined;
+
+  const by = rule === null ? "a WebMCP Guard policy" : `WebMCP Guard policy ${attribution(rule)}`;
+  const sentences = [`Privacy notice: sensitive values in this result were replaced by ${by}.`];
+
+  if (used.has("tokenize")) {
+    sentences.push(
+      "Strings like tok_name_1a2b3c4d are stable WebMCP Guard tokens — the same person or " +
+        "value always yields the same token, so you can compare them across results and pass " +
+        "them back into any tool that accepts an identifier.",
+    );
+  }
+
+  const masked = used.has("mask");
+  const generalized = used.has("contextualize");
+  if (masked && generalized) {
+    sentences.push(
+      "Masked values (•••) and generalized values (age brackets, city/state) cannot be recovered.",
+    );
+  } else if (masked) {
+    sentences.push("Masked values (•••) cannot be recovered.");
+  } else if (generalized) {
+    sentences.push("Generalized values (age brackets, city/state) cannot be recovered.");
+  }
+
+  return sentences.join(" ");
 }
 
 /**

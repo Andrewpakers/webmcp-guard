@@ -264,6 +264,44 @@ describe("happy path", () => {
     const harness = await setup({ transform: () => transformResponse(undefined) });
     await expect(harness.call({})).resolves.toBe(EMPTY_RESULT_MESSAGE);
   });
+
+  /**
+   * A model that reads `tok_name_1a2b3c4d` with no explanation either treats it
+   * as corrupt data or wastes a turn trying to "look up" a handle it already
+   * holds. The server sends its explanation with the result; the SDK's job is
+   * to put it where the model will read it, and to add nothing when there is
+   * nothing to say.
+   */
+  describe("the server's privacy notice", () => {
+    const NOTICE =
+      "Privacy notice: sensitive values in this result were replaced by WebMCP Guard policy " +
+      "Tokenize PHI (phi-transform-default).";
+
+    const withNotice = (result: unknown) =>
+      envelopeResponse({
+        result,
+        classesFound: ["name"],
+        ruleIds: ["R-transform"],
+        notice: NOTICE,
+      });
+
+    it("appends it after a blank line for a string result", async () => {
+      const harness = await setup({ transform: () => withNotice("Patient tok_name_1") });
+      await expect(harness.call({})).resolves.toBe(`Patient tok_name_1\n\n${NOTICE}`);
+    });
+
+    it("appends it after stringification for an object result", async () => {
+      const harness = await setup({ transform: () => withNotice({ name: "tok_name_1" }) });
+      await expect(harness.call({})).resolves.toBe(`{"name":"tok_name_1"}\n\n${NOTICE}`);
+    });
+
+    it("adds nothing when the server sent none", async () => {
+      const harness = await setup({ transform: () => transformResponse("Nothing was changed.") });
+      const result = await harness.call({});
+      expect(result).toBe("Nothing was changed.");
+      expect(String(result)).not.toContain("Privacy notice");
+    });
+  });
 });
 
 describe("deny", () => {
