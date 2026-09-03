@@ -283,7 +283,7 @@ Building against a browser API this new means the spec and the implementation so
 | What                    | URL                                                                                            | Credentials                                          |
 | ----------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | Lakeside Medical portal | [webmcp-guard-portal.onrender.com/patients](https://webmcp-guard-portal.onrender.com/patients) | No login; switch persona in the header               |
-| WebMCP Guard Console    | [webmcp-guard-console.vercel.app](https://webmcp-guard-console.vercel.app/)                    | Admin token: provided on the Devpost submission form |
+| WebMCP Guard Console    | [webmcp-guard-console.vercel.app](https://webmcp-guard-console.vercel.app/)                    | Admin token: `Nit52TvyXZWpgzot1UIqMV4ktAB3oCdFbrk5M5AFSYg=` |
 
 To watch an agent use it, open the portal in **ChatGPT's in-app browser**, or in **Chrome 149+** with `chrome://flags/#enable-webmcp-testing` enabled (full relaunch required) — the header chip turns green with the guarded tool count. Then ask for something real: _"Find patients with hypertension who have an appointment this week."_ Watch the Agent Activity drawer in the portal, and the audit trail in the console.
 
