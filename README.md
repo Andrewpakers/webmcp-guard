@@ -6,9 +6,9 @@ WebMCP lets any website hand structured tools to an AI agent. For an app that ho
 
 WebMCP Guard is that layer, built once. You register tools through the guard instead of directly with `document.modelContext`, and every call is resolved against policy, every result is classified and transformed, and every step lands in an audit log an administrator reads in a console. The demo in this repo is a fictitious hospital portal, but nothing in the SDK is healthcare-specific.
 
+- **Live demo:** [portal](https://webmcp-guard-portal.onrender.com/patients) · [console](https://webmcp-guard-console.vercel.app/) — [details below](#live-demo)
 - **Repo layout:** [monorepo table](#monorepo)
 - **Integrate it in 15 minutes:** [`packages/sdk/README.md`](packages/sdk/README.md)
-- **Design pack (the spec this was built from):** [`docs/`](docs/)
 - **Threat model, honestly:** [below](#threat-model-the-honest-version)
 
 ---
@@ -17,11 +17,11 @@ WebMCP Guard is that layer, built once. You register tools through the guard ins
 
 Lakeside Medical is a Next.js patient portal with 60 synthetic patients and seven WebMCP tools — search, read, update, note, appointments, export, delete. Humans use it normally. Agents get the same seven tools.
 
-![The Lakeside Medical patient list](docs/captures/phase1-before/portal-patients.png)
+![The Lakeside Medical patient list](assets/unguarded/portal-patients.png)
 
 ### Before: what an agent sees with raw WebMCP
 
-Phase 1 of this build registered those tools directly with `document.modelContext.registerTool` and called them from a real WebMCP browser. This is a verbatim excerpt of what came back — captured in [`docs/captures/phase1-before/`](docs/captures/phase1-before/):
+Register those tools directly with `document.modelContext.registerTool` — no guard — and call them from a real WebMCP browser, and this is a verbatim excerpt of what comes back (captured in [`assets/unguarded/`](assets/unguarded/)):
 
 ```
 LM-100028,Tricia,Bashirian,1957-01-08,927-78-1337,(812) 555-0127,
@@ -29,7 +29,7 @@ tricia.bashirian27@example.com,"343 Forest Avenue, North Ednamouth, SC 94944",
 BlueRidge Assurance,JVQ768472895,Hypertension; Hyperlipidemia,...
 ```
 
-Name, date of birth, SSN, phone, e-mail, street address and insurance member id, straight into the model's context — and `delete_patient` removed a record with no prompt of any kind ([`tool-delete_patient-silent.txt`](docs/captures/phase1-before/tool-delete_patient-silent.txt)). That is the default posture of an agent-enabled app, and it is why the security team says no.
+Name, date of birth, SSN, phone, e-mail, street address and insurance member id, straight into the model's context — and `delete_patient` removed a record with no prompt of any kind ([`tool-delete_patient-silent.txt`](assets/unguarded/tool-delete_patient-silent.txt)). That is the default posture of an agent-enabled app, and it is why the security team says no.
 
 ### After: the same tool, through the guard
 
@@ -77,7 +77,7 @@ And the loop closes: hand `tok_mrn_e53e5143` back to `add_visit_note`, and the g
 
 Destructive tools ask the person at the keyboard, in the page:
 
-![The in-page confirmation modal](docs/captures/phase5/confirmation-modal.png)
+![The in-page confirmation modal](assets/confirmation-modal.png)
 
 Bulk export demands a written justification, which is evaluated and then stored on the audit entry. These are the guard's real, un-edited replies to the agent:
 
@@ -89,7 +89,7 @@ Every string an agent reads back is written for a model to act on — what happe
 
 ### And an administrator can see all of it
 
-![The console's audit log detail drawer, showing before and after payloads](docs/captures/console/log-detail-drawer.png)
+![The console's audit log detail drawer, showing before and after payloads](assets/console/log-detail-drawer.png)
 
 Every call — allowed, denied, transformed, human-approved — is one row with the matched rule ids, the agent's posture, the resolved identity, and both payloads before and after. Revealing a stored value in the console is itself written to the audit log.
 
@@ -236,7 +236,7 @@ Two more notes on running it locally:
 
 ## Threat model, the honest version
 
-Condensed from [`docs/03-architecture.md`](docs/03-architecture.md). This section is deliberately not written as marketing.
+This section is deliberately not written as marketing.
 
 **In scope — what WebMCP Guard actually protects against:**
 
@@ -256,19 +256,19 @@ Condensed from [`docs/03-architecture.md`](docs/03-architecture.md). This sectio
 The framing that matters: the human at the keyboard already has full access to this data. The question is not "can data escape" but "can a _browser agent_ obtain raw data or take actions without going through the guarded tools?"
 
 - **Direct API calls, or tampered client code — no.** Enforcement is server-side. The gate, the vault, detokenization and the audit writer are all in `@webmcp-guard/server`. An agent that bypasses the SDK and calls the guard API directly gets exactly the same verdicts, the same tokenized data and the same log entries. There is no client-side decision to subvert.
-- **DOM scraping and UI actuation — partially.** An agent that drives the human interface sees what the human sees. Two mitigations are real: the tools set `annotations.untrustedContentHint` and are described so that the tool path is the _efficient_ path, which is enough for a well-behaved agent; and the patient chart is **masked at rest** ([`docs/05`](docs/05-demo-app-requirements.md)) — SSN, date of birth, phone and e-mail are rendered as `•••-••-••••`-style masks by the server and never sent to the browser at all, so a scraped chart contains no identifier to scrape, and the one route that returns a real value (`POST /api/portal/reveal-field`) writes a `ui_reveal_field` entry naming the persona, the patient and the data class into the same audit log as every tool call _before_ it answers (free-text visit notes are still rendered as written: the mask covers structured identifiers, not prose a clinician has to read).
+- **DOM scraping and UI actuation — partially.** An agent that drives the human interface sees what the human sees. Two mitigations are real: the tools set `annotations.untrustedContentHint` and are described so that the tool path is the _efficient_ path, which is enough for a well-behaved agent; and the patient chart is **masked at rest** — SSN, date of birth, phone and e-mail are rendered as `•••-••-••••`-style masks by the server and never sent to the browser at all, so a scraped chart contains no identifier to scrape, and the one route that returns a real value (`POST /api/portal/reveal-field`) writes a `ui_reveal_field` entry naming the persona, the patient and the data class into the same audit log as every tool call _before_ it answers (free-text visit notes are still rendered as written: the mask covers structured identifiers, not prose a clinician has to read).
 - **The residual gap, stated plainly:** a fully actuating agent driving a revealed UI is indistinguishable from the human, and no client-side library can close that. Closing it requires cooperation from the browser or agent runtime — an enterprise policy that restricts a given agent to the tool channel, or an attestation the page can verify. That is a platform-level problem, and it is exactly the deployment model this SDK is designed to slot into: when the browser can enforce "agents use tools", WebMCP Guard is what decides _which_ tools, with _what_ data, and writes down what happened.
 
 Two smaller pieces of candor, because they are true:
 
 - **`/gate` and `/transform` carry no guard-layer authentication**, on purpose. They are mounted inside the host app and reachable by exactly whoever can already reach the page; the host app's own session is the boundary, the same one that protects its data APIs. Nothing in this repo describes them as authenticated.
-- **`export_patients` returns CSV text and is only partially protected by transformation.** The justification gate is the real control on that tool; structured export rows are future work. Known gaps are documented rather than hidden — see the work log in [`docs/07-development-plan.md`](docs/07-development-plan.md).
+- **`export_patients` returns CSV text and is only partially protected by transformation.** The justification gate is the real control on that tool; structured export rows are future work. Known gaps are documented rather than hidden.
 
 ---
 
 ## What we learned about WebMCP
 
-Building against a browser API this new means the spec and the implementation sometimes disagree. Three findings from this build, all caught by running real tool calls through a real WebMCP browser (headless Chromium 151, `scripts/webmcp-e2e.mjs` driving it over CDP), all recorded in the work log:
+Building against a browser API this new means the spec and the implementation sometimes disagree. Three findings from this build, all caught by running real tool calls through a real WebMCP browser (headless Chromium 151, `scripts/webmcp-e2e.mjs` driving it over CDP):
 
 **1. `execute` is invoked with no second argument.** The typings (`webmcp-types`) declare `execute(input, { signal })`, and every one of the portal's seven tools destructured that options object. Chromium 151 calls `execute(input)` — one argument. Every tool crashed on the first agent call. The fix is `ctx?.signal`, and it is now baked into the SDK's public type: `execute(input, context?)` with the context optional and declared with method syntax so a host tool typed against `webmcp-types` still assigns cleanly.
 
@@ -278,17 +278,16 @@ Building against a browser API this new means the spec and the implementation so
 
 ---
 
-## Deployed URLs
+## Live demo
 
 | What                    | URL                                                                                            | Credentials                                          |
 | ----------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | Lakeside Medical portal | [webmcp-guard-portal.onrender.com/patients](https://webmcp-guard-portal.onrender.com/patients) | No login; switch persona in the header               |
-| WebMCP Guard Console    | [webmcp-guard-console.vercel.app](https://webmcp-guard-console.vercel.app)                     | Admin token: provided on the Devpost submission form |
-| Demo video              | `TODO-until-video`                                                                             | —                                                    |
+| WebMCP Guard Console    | [webmcp-guard-console.vercel.app](https://webmcp-guard-console.vercel.app/)                    | Admin token: provided on the Devpost submission form |
 
-Deploy procedure: [`DEPLOYMENT.md`](DEPLOYMENT.md) + [`render.yaml`](render.yaml).
+To watch an agent use it, open the portal in **ChatGPT's in-app browser**, or in **Chrome 149+** with `chrome://flags/#enable-webmcp-testing` enabled (full relaunch required) — the header chip turns green with the guarded tool count. Then ask for something real: _"Find patients with hypertension who have an appointment this week."_ Watch the Agent Activity drawer in the portal, and the audit trail in the console.
 
-The portal runs on a free Render instance, which sleeps when idle: the first request after a period of inactivity can take roughly a minute to wake. The disk is ephemeral across restarts, and that is fine — schema, demo patients and the default policy are all seeded on boot.
+The portal runs on a free Render instance, which sleeps when idle: the first request after a period of inactivity can take roughly a minute to wake. The disk is ephemeral across restarts, and that is fine — schema, demo patients and the default policy are all seeded on boot. Deploy your own with [`DEPLOYMENT.md`](DEPLOYMENT.md) + [`render.yaml`](render.yaml).
 
 ---
 
@@ -298,9 +297,7 @@ The portal runs on a free Render instance, which sleeps when idle: the first req
 
 ## Documentation
 
-The [`docs/`](docs/) directory is the design pack this project was built from, kept as written: the project brief, the challenge requirements, the architecture and threat model, the SDK requirements, the demo app and console specs, a WebMCP API reference, and [`docs/07-development-plan.md`](docs/07-development-plan.md) — whose work log records every deviation, decision and known gap, dated, including the three browser findings above.
-
-For integrating the SDK into your own app, start at [`packages/sdk/README.md`](packages/sdk/README.md).
+For integrating the SDK into your own app, start at [`packages/sdk/README.md`](packages/sdk/README.md) — a 15-minute guide from a blank Next.js app to a policy-wrapped tool.
 
 ## License
 

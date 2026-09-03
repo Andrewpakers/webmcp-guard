@@ -1,6 +1,6 @@
 # Deploying WebMCP Guard's demo apps
 
-Two deployments, per `docs/03-architecture.md`:
+Two deployments:
 
 | App                                                       | Host                         | Why                                                                                                           |
 | --------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------- |
@@ -58,5 +58,5 @@ redeploy. The guard API echoes exactly that origin in
   real values — the Render blueprint generates them.
 - `/gate` and `/transform` are deliberately unauthenticated at the guard layer:
   they sit inside the host app and share its session boundary. The guard
-  governs the agent channel, not the human (see the threat model in
-  `docs/03-architecture.md`).
+  governs the agent channel, not the human (see the threat model in the
+  root README).

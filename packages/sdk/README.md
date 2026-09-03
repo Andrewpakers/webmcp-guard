@@ -368,4 +368,4 @@ Stated rather than hidden, because you are going to find them anyway:
 
 ---
 
-MIT licensed. Threat model, architecture and the full design pack: the [root README](../../README.md) and [`docs/`](../../docs/).
+MIT licensed. Threat model and architecture: the [root README](../../README.md).
