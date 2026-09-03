@@ -83,8 +83,7 @@ sit on screen for two seconds.
 
 **Prompt 2 to type** (use the token the agent just showed you):
 
-> Add a note to that patient: "Called about refill, patient will collect
-> Thursday."
+> Add a note to that patient: "Called about refill, patient will collect Thursday."
 
 **Voiceover (95 words):**
 
@@ -120,12 +119,15 @@ Agent Activity drawer (portal header, right side) for two seconds — it lists
 The agent is refused. Show the reply on screen; it is exactly this:
 
 > Justification required by policy Export requires justification
-> (`export-requires-justification`): call "export_patients" again with a
-> "justification" argument of at least 40 characters explaining why this data is
-> needed and for whom — name the person or team who asked, and what they will do
-> with it.
+> (`export-requires-justification`): stop and ask the person you are working
+> with why this data is needed and for whom, then call "export_patients" again
+> with their reason in the "justification" argument (at least 40 characters).
+> Relay their words — do not compose a justification yourself; it is recorded
+> in the audit log as the human's stated reason.
 
-The agent supplies one and retries; the export succeeds.
+The agent turns to you and asks why. Answer in the chat with something real —
+e.g. *"Dr. Reyes asked for the hypertension cohort for the quarterly
+cardiology quality review"* — the agent relays it, and the export succeeds.
 
 **Shot B — confirmation.** Same session.
 
@@ -147,11 +149,12 @@ Click **Decline**. The agent's reply:
 > nothing was done. … Do not try again unless they ask you to — tell them it was
 > declined and ask what they would like instead.
 
-**Voiceover (72 words):**
+**Voiceover (76 words):**
 
-> Bulk export demands a written justification — the agent has to say who asked
-> and what for. It supplies one, the evaluator accepts it, and the export runs,
-> with that justification stored on the audit record.
+> Bulk export demands a written justification — and the agent is told not to
+> invent one. It stops and asks me. I answer, it relays my reason, the
+> evaluator accepts it, and the export runs — with my words stored on the
+> audit record.
 >
 > Deleting a patient asks a human. Not a checkbox buried in settings — a prompt,
 > in the page, for the person actually sitting there. I decline. And the agent

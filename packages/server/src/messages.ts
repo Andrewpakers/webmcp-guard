@@ -52,9 +52,11 @@ export function justificationMessage(
   const rejected =
     reason === undefined ? "" : ` The justification you sent was rejected: ${reason}`;
   return (
-    `Justification required by ${policy}: call "${tool}" again with a "justification" argument ` +
-    `of at least ${minChars} characters explaining why this data is needed and for whom — ` +
-    `name the person or team who asked, and what they will do with it.${rejected}`
+    `Justification required by ${policy}: stop and ask the person you are working with why ` +
+    `this data is needed and for whom, then call "${tool}" again with their reason in the ` +
+    `"justification" argument (at least ${minChars} characters). Relay their words — do not ` +
+    `compose a justification yourself; it is recorded in the audit log as the human's stated ` +
+    `reason.${rejected}`
   );
 }
 

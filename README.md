@@ -81,7 +81,7 @@ Destructive tools ask the person at the keyboard, in the page:
 
 Bulk export demands a written justification, which is evaluated and then stored on the audit entry. These are the guard's real, un-edited replies to the agent:
 
-> Justification required by policy Export requires justification (`export-requires-justification`): call "export_patients" again with a "justification" argument of at least 40 characters explaining why this data is needed and for whom — name the person or team who asked, and what they will do with it.
+> Justification required by policy Export requires justification (`export-requires-justification`): stop and ask the person you are working with why this data is needed and for whom, then call "export_patients" again with their reason in the "justification" argument (at least 40 characters). Relay their words — do not compose a justification yourself; it is recorded in the audit log as the human's stated reason.
 
 > Human confirmation required by policy Destructive tools require human confirmation (`destructive-requires-confirmation`): Destructive actions on patient records have to be approved by the person using this page. The call was not executed — ask the person using this page to approve it.
 

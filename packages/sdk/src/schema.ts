@@ -51,10 +51,11 @@ export function justificationDescription(minChars: number | null): string {
   const length =
     minChars === null ? "" : ` It must be at least ${minChars} characters of real explanation.`;
   return (
-    "Required by this organization's policy before this tool may run: explain why this data is " +
-    "needed and for whom. Name the person or team who asked for it and what they will do with " +
-    `it — "because the user asked" is not enough.${length} ` +
-    "This text is recorded in the audit log and is not sent to the tool itself."
+    "Required by this organization's policy before this tool may run: the reason this data is " +
+    "needed and for whom. Ask the person you are working with and relay their answer — do not " +
+    `compose one yourself; "because the user asked" is not enough.${length} ` +
+    "This text is recorded in the audit log as the human's stated reason and is not sent to " +
+    "the tool itself."
   );
 }
 
