@@ -42,6 +42,9 @@ const command = cmdIdx >= 0 ? args[cmdIdx] : "list";
 const cmdArgs = cmdIdx >= 0 ? args.slice(cmdIdx + 1) : [];
 
 const chromium = flag("--browser", "chromium");
+// Optional UA override, e.g. --ua "... Claude/1.0" to exercise posture rules
+// that match on the SDK's best-effort agent-id markers.
+const userAgent = flag("--ua", undefined);
 const port = 9000 + Math.floor(Math.random() * 800);
 // Snap chromium can only write to non-hidden paths under $HOME (dotfiles are
 // excluded by snap confinement); its own common dir is the safest choice.
@@ -60,6 +63,7 @@ const child = spawn(
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     "--window-size=1440,900",
+    ...(userAgent ? [`--user-agent=${userAgent}`] : []),
     "about:blank",
   ],
   { stdio: "ignore" },
